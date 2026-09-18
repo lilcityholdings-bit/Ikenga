@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ikenga — Operator Console</title>
+<style>
+  :root{
+    --bg:#0d0f14; --panel:#161a22; --line:#252b36; --ink:#e8ecf3; --dim:#8b95a7;
+    --accent:#d4a03c; --good:#3fb27f; --warn:#e0a33e; --bad:#e0574a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       padding:16px;max-width:900px;margin:0 auto}
+  h1{font-size:19px;margin:0;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+  h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim);
+     margin:22px 0 8px;font-weight:600}
+  header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+         padding-bottom:12px;border-bottom:1px solid var(--line)}
+  header .sub{color:var(--dim);font-size:12px}
+  .row{display:flex;gap:8px;margin:14px 0;flex-wrap:wrap}
+  input{flex:1;min-width:180px;background:var(--panel);border:1px solid var(--line);
+        color:var(--ink);padding:11px 12px;border-radius:8px;font-size:15px}
+  button{background:var(--accent);color:#15181f;border:0;padding:11px 18px;border-radius:8px;
+         font-weight:700;font-size:15px}
+  button:disabled{opacity:.5}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.09em}
+  .card .v{font-size:22px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+  .card .n{color:var(--dim);font-size:11px;margin-top:2px}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  ul{list-style:none;padding:0;margin:0}
+  li.item{background:var(--panel);border:1px solid var(--line);border-left-width:3px;
+          border-radius:8px;padding:10px 12px;margin-bottom:6px}
+  li.action{border-left-color:var(--warn)} li.critical{border-left-color:var(--bad)}
+  li.item .q{font-weight:600} li.item .r{color:var(--dim);font-size:12px;margin-top:2px}
+  li.item .id{color:var(--dim);font-size:11px;font-family:ui-monospace,monospace;margin-top:3px}
+  .empty{color:var(--dim);font-size:13px;padding:8px 0}
+  #err{color:var(--bad);font-size:13px;min-height:18px}
+  footer{color:var(--dim);font-size:11px;margin-top:26px;padding-top:12px;
+         border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Ikenga</h1><span class="sub">operator console</span>
+  <span class="sub" id="stamp" style="margin-left:auto"></span>
+</header>
+
+<div class="row">
+  <input id="key" type="password" placeholder="Owner key" autocomplete="off" spellcheck="false">
+  <button id="go">Load</button>
+</div>
+<div id="err"></div>
+<div id="out" hidden>
+  <h2>Revenue</h2><div class="grid" id="revenue"></div>
+  <h2>Markets</h2><div class="grid" id="markets"></div>
+  <h2>Needs attention</h2><ul id="attention"></ul>
+  <h2>Reserves</h2><div class="grid" id="reserves"></div>
+  <h2>Forecast feed</h2><div class="grid" id="feed"></div>
+</div>
+<footer>
+  The key is kept in this page only, for the duration of this tab. It is sent to this server and
+  nowhere else. Rake is charged on the losing pool only, so a winner never receives less than
+  they staked.
+</footer>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  function num(n,d){ if(n===null||n===undefined) return '—';
+    return Number(n).toLocaleString(undefined,{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
+  function card(k,v,note,cls){
+    return '<div class="card"><div class="k">'+esc(k)+'</div><div class="v'+(cls?' '+cls:'')+'">'
+      +esc(v)+'</div>'+(note?'<div class="n">'+esc(note)+'</div>':'')+'</div>';
+  }
+  function render(d){
+    $('stamp').textContent=new Date(d.as_of_ms).toLocaleString();
+    var rev=d.revenue.by_asset.length
+      ? d.revenue.by_asset.map(function(r){return card(r.asset+' collected',num(r.amount,2));}).join('')
+      : card('collected','0.00','no markets have settled yet');
+    $('revenue').innerHTML = rev
+      + card('rake', (d.revenue.rake_bps/100)+'%','of the losing pool only')
+      + card('settles in', d.settlement_asset, d.real_money_enabled?'real money on':'test mode');
+
+    var m=d.markets;
+    $('markets').innerHTML =
+        card('open',num(m.open))
+      + card('awaiting outcome',num(m.closed),null,m.closed?'warn':null)
+      + card('in dispute window',num(m.proposed))
+      + card('disputed',num(m.disputed),null,m.disputed?'bad':null)
+      + card('resolved',num(m.resolved))
+      + card('voided',num(m.voided))
+      + card('staked',num(m.total_staked,2),'across all markets')
+      + card('participants',num(m.unique_participants),'distinct agents')
+      + card('registered',num(d.agents_registered),'agent accounts');
+
+    var a=d.needs_attention;
+    $('attention').innerHTML = a.length ? a.map(function(x){
+      return '<li class="item '+esc(x.severity)+'"><div class="q">'+esc(x.question)+'</div>'
+        +'<div class="r">'+esc(x.reason)+'</div><div class="id">'+esc(x.market_id)+'</div></li>';
+    }).join('') : '<div class="empty">Nothing waiting on you.</div>';
+
+    var r=d.reserves;
+    $('reserves').innerHTML =
+        card('held',num(r.held,2),d.settlement_asset)
+      + card('owed to agents',num(r.outstanding,2),'balances outstanding')
+      + card('withdrawals',num(r.withdrawals_pending,2),num(r.withdrawals_pending_count)+' pending')
+      + card('backing', r.fully_backed?'full':'SHORT '+num(r.shortfall,2),
+             r.fully_backed?'claims ≤ reserves':'top up before settling',
+             r.fully_backed?'good':'bad');
+
+    var t=d.track_record;
+    $('feed').innerHTML =
+        card('subscribers',num(d.feed.subscribers), d.feed.labels.slice(0,3).join(', ')||null)
+      + card('scored markets',num(t.resolved_markets))
+      + card('brier', t.mean_brier===null?'—':Number(t.mean_brier).toFixed(3),'lower is better')
+      + card('weighted brier', t.mean_weighted_brier===null?'—':Number(t.mean_weighted_brier).toFixed(3),
+             'what subscribers buy')
+      + card('top pick', t.top_pick_accuracy===null?'—':Math.round(t.top_pick_accuracy*100)+'%','hit rate')
+      + card('excluded',num(t.uncontested_excluded),'uncontested, not scored')
+      + card('points markets',num(t.promotional_excluded),'free money, not scored');
+    $('out').hidden=false;
+  }
+  function load(){
+    var k=$('key').value.trim();
+    if(!k){$('err').textContent='Enter the owner key.';return;}
+    $('go').disabled=true; $('err').textContent='';
+    var x=new XMLHttpRequest();
+    x.open('GET','/v1/dashboard',true);
+    x.setRequestHeader('X-Owner-Key',k);
+    x.onload=function(){
+      $('go').disabled=false;
+      if(x.status===200){ try{ render(JSON.parse(x.responseText)); }
+        catch(e){ $('err').textContent='Could not read the response.'; } }
+      else if(x.status===403){ $('err').textContent='That key was rejected.'; }
+      else { $('err').textContent='Server returned '+x.status+'.'; }
+    };
+    x.onerror=function(){$('go').disabled=false;$('err').textContent='Could not reach the server.';};
+    x.send();
+  }
+  $('go').addEventListener('click',load);
+  $('key').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+})();
+</script>
+</body>
+</html>

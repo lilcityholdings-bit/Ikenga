@@ -1,0 +1,553 @@
+#!/usr/bin/env bash
+#
+# Ikenga — one command to run the whole thing.
+#
+#   ./ikenga start     build if needed, then run it and print your dashboard link
+#   ./ikenga stop      stop it
+#   ./ikenga status    is it up, and is it healthy
+#   ./ikenga logs      watch what it's doing
+#   ./ikenga test      run every test (unit + integration + the attack suite)
+#   ./ikenga demo      start it and fill it with example markets to click around in
+#   ./ikenga doctor    something is wrong and you want to know what
+#   ./ikenga sources   ask every price feed for a price and show what came back
+#   ./ikenga fuzz [secs]      throw malformed everything at it and see if it holds
+#   ./ikenga install-service   keep it running for real: on boot, after a crash, reachable
+#
+# Anything it needs that isn't installed, it installs. Anything it generates once — your owner
+# key, the write-ahead log — it keeps, so a restart doesn't hand you a different platform.
+
+# Run under bash even when launched as `sh ikenga start`, which is an easy thing to type and
+# otherwise fails with "Illegal option -o pipefail" — an error that tells you nothing about what
+# you did or how to fix it.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then exec bash "$0" "$@"; fi
+  echo "This needs bash. Install it, then run: bash $0 $*" >&2
+  exit 1
+fi
+
+set -uo pipefail
+
+# Never die without saying why. `set -e` exiting on an unreported failure is what turns a fixable
+# problem into "it just doesn't work" — the one bug report nobody can act on.
+set -e
+trap 'code=$?; [ $code -ne 0 ] && printf "\033[31m\n✗ Stopped at line $LINENO (exit $code).\033[0m\n  Run \033[36m./ikenga doctor\033[0m — it checks everything and says what is wrong.\n" >&2; exit $code' ERR
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENGINE="$ROOT/services/matching-engine"
+DATA="$ROOT/data"
+BIN="$ENGINE/target/release/ikenga-matching-engine"
+KEY_FILE="$DATA/owner.key"
+WAL="$DATA/ikenga.wal"
+PID_FILE="$DATA/ikenga.pid"
+LOG="$DATA/ikenga.log"
+PORT="${PORT:-8080}"
+
+# Bind to loopback by default. A server you can reach from the internet is a decision, not an
+# accident, so it takes an explicit IKENGA_PUBLIC=1.
+if [ "${IKENGA_PUBLIC:-0}" = "1" ]; then BIND="0.0.0.0:$PORT"; else BIND="127.0.0.1:$PORT"; fi
+
+say()  { printf '\033[36m%s\033[0m\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
+die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Bring an already-installed Rust onto PATH.
+#
+# rustup is installed here with --no-modify-path, and some hosts (Cloud Shell especially) keep
+# your home directory but start each session with a fresh PATH. So "cargo is not on PATH" does
+# NOT mean "Rust is not installed" — checking only `command -v cargo` sent this script off to
+# reinstall a toolchain that was already sitting in ~/.cargo.
+load_rust() {
+  command -v cargo >/dev/null 2>&1 && return 0
+  # ${CARGO_HOME:-} not $CARGO_HOME: `set -u` turns an unset variable into an instant, cryptic
+  # one-line death, and CARGO_HOME is unset in almost every shell.
+  for env_file in "$HOME/.cargo/env" "${CARGO_HOME:-}/env"; do
+    if [ -n "${env_file:-}" ] && [ -f "$env_file" ]; then
+      # shellcheck disable=SC1090
+      . "$env_file" 2>/dev/null || true
+      command -v cargo >/dev/null 2>&1 && return 0
+    fi
+  done
+  [ -x "$HOME/.cargo/bin/cargo" ] && { export PATH="$HOME/.cargo/bin:$PATH"; return 0; }
+  return 1
+}
+
+install_openssl() {
+  say "Installing openssl (needed to verify agent signatures)..."
+  local sudo_cmd=""
+  [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1 && sudo_cmd="sudo"
+  if   command -v apt-get >/dev/null 2>&1; then $sudo_cmd apt-get update -qq && $sudo_cmd apt-get install -y -qq openssl
+  elif command -v dnf     >/dev/null 2>&1; then $sudo_cmd dnf install -y -q openssl
+  elif command -v yum     >/dev/null 2>&1; then $sudo_cmd yum install -y -q openssl
+  elif command -v apk     >/dev/null 2>&1; then $sudo_cmd apk add --no-cache openssl
+  elif command -v pkg     >/dev/null 2>&1; then pkg install -y openssl
+  elif command -v brew    >/dev/null 2>&1; then brew install openssl
+  else return 1
+  fi
+}
+
+install_rust() {
+  say "Installing Rust (one time, a few minutes)..."
+  if ! curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$DATA/rustup.sh"; then
+    return 1
+  fi
+  sh "$DATA/rustup.sh" -y --no-modify-path >/dev/null 2>&1 || return 1
+  rm -f "$DATA/rustup.sh"
+  load_rust
+}
+
+ensure_deps() {
+  mkdir -p "$DATA"
+  command -v curl >/dev/null 2>&1 || die "curl is not installed. Install it, then run this again."
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    install_openssl || die "Could not install openssl automatically.
+  Install it yourself, then run this again:
+    sudo apt-get install -y openssl        (Ubuntu / Debian / Cloud Shell)
+    brew install openssl                   (macOS)"
+  fi
+
+  if ! load_rust; then
+    install_rust || die "Could not install Rust.
+  This is almost always the network — the download comes from https://sh.rustup.rs.
+  Install it yourself, then run this again:
+    curl https://sh.rustup.rs -sSf | sh -s -- -y
+    source \$HOME/.cargo/env"
+    load_rust || die "Rust installed, but 'cargo' still is not on PATH.
+  Run this, then try again:
+    source \$HOME/.cargo/env"
+  fi
+}
+
+ensure_key() {
+  mkdir -p "$DATA"
+  if [ ! -s "$KEY_FILE" ]; then
+    openssl rand -hex 32 > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+    ok "Generated your owner key and saved it to data/owner.key (keep this file)"
+  fi
+}
+
+build() {
+  ensure_deps
+  mkdir -p "$DATA"
+  say "Building (first time takes a minute or two)..."
+  # Warnings are noise here — dead code the crate keeps on purpose. Errors are not, so on
+  # failure the real output is replayed in full rather than swallowed by the filter.
+  if ! ( cd "$ENGINE" && cargo build --release > "$DATA/build.log" 2>&1 ); then
+    mkdir -p "$DATA"
+    grep -E '^error' -A 8 "$DATA/build.log" | head -40
+    die "Build failed — full output in data/build.log"
+  fi
+  [ -x "$BIN" ] || die "Build reported success but produced no binary. See data/build.log"
+  ok "Built"
+}
+
+running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+
+start() {
+  running && { warn "Already running (pid $(cat "$PID_FILE")). Use ./ikenga stop first."; exit 0; }
+  [ -x "$BIN" ] || build
+  ensure_key
+  mkdir -p "$DATA"
+
+  # Passed through only when the operator actually set it. Unset means "use the binary's default",
+  # which is the one place the list of working sources is written down.
+  if [ -n "${IKENGA_ROUTE_SOURCES+set}" ]; then export IKENGA_ROUTE_SOURCES; fi
+
+  IKENGA_BIND="$BIND" \
+  IKENGA_OWNER_KEY="$(cat "$KEY_FILE")" \
+  IKENGA_WAL_PATH="$WAL" \
+  IKENGA_WAL_SYNC="${IKENGA_WAL_SYNC:-always}" \
+  IKENGA_REAL_MONEY="${IKENGA_REAL_MONEY:-0}" \
+  IKENGA_AUTOPILOT="${IKENGA_AUTOPILOT:-BTC-USD:600@-50,0,+50, ETH-USD:900@-75,0,+75}" \
+  IKENGA_TRUSTED_PROXIES="${IKENGA_TRUSTED_PROXIES:-}" \
+  IKENGA_SEED_PER_MARKET="${IKENGA_SEED_PER_MARKET:-25}" \
+  IKENGA_SEED_BANKROLL="${IKENGA_SEED_BANKROLL:-10000}" \
+  nohup "$BIN" > "$LOG" 2>&1 &
+  echo $! > "$PID_FILE"
+
+  for _ in $(seq 1 40); do
+    if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then break; fi
+    running || { warn "It stopped on startup. Last lines:"; tail -20 "$LOG"; exit 1; }
+    sleep 0.25
+  done
+  curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || { warn "Didn't come up. Last lines:"; tail -20 "$LOG"; exit 1; }
+
+  local key; key="$(cat "$KEY_FILE")"
+  echo
+  printf '\033[32m╭──────────────────────────────────────────────────────────╮\033[0m\n'
+  printf '\033[32m│  Ikenga is running                                       │\033[0m\n'
+  printf '\033[32m╰──────────────────────────────────────────────────────────╯\033[0m\n'
+  echo
+  echo "  Dashboard   http://localhost:$PORT/dashboard"
+  echo "  Owner key   $key"
+  echo
+  echo "  Open the dashboard, paste the owner key, tap Load."
+  echo
+  echo "  API root    http://localhost:$PORT/"
+  echo "  Free feed   http://localhost:$PORT/v1/feed"
+  echo "  Logs        ./ikenga logs        Stop   ./ikenga stop"
+  echo "  Place a bet http://localhost:$PORT/bet          (works on a phone)"
+  echo "  For bots    http://localhost:$PORT/build        (send this to bot builders)"
+  echo "  Tool specs  http://localhost:$PORT/v1/tools     (paste into an AI agent)"
+  echo
+  echo "  Only reachable from this machine. To get a public HTTPS link:  ./ikenga tunnel"
+  if [ -n "${IKENGA_AUTOPILOT:-}" ]; then
+    echo
+    echo "  Autopilot is ON — it opens and settles markets on its own, around the clock."
+    echo "  Every new market is seeded with ${IKENGA_SEED_PER_MARKET:-25} points on each side,"
+    echo "  so the first agent to arrive has something real to win. Turn that off with"
+    echo "  IKENGA_SEED_PER_MARKET=0."
+  fi
+  [ "${IKENGA_REAL_MONEY:-0}" = "1" ] && echo && warn "REAL MONEY IS ON — USDC balances are withdrawable."
+  echo
+}
+
+stop() {
+  running || { warn "Not running."; exit 0; }
+  kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  for _ in $(seq 1 20); do running || break; sleep 0.25; done
+  running && kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  ok "Stopped. Your markets and balances are safe in data/ikenga.wal."
+}
+
+status() {
+  if running; then
+    ok "Running (pid $(cat "$PID_FILE")) on $BIND"
+    curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || warn "Process is up but /health didn't answer."
+    if [ -s "$DATA/tunnel.url" ] && [ -s "$DATA/tunnel.pid" ] && kill -0 "$(cat "$DATA/tunnel.pid")" 2>/dev/null; then
+      ok "Public: $(cat "$DATA/tunnel.url")/bet"
+    else
+      echo "  Local only. For a public HTTPS link:  ./ikenga tunnel"
+    fi
+    # Settlement is the failure that hides: markets keep opening and taking bets while nothing
+    # resolves. Ask on every status check rather than waiting for someone to wonder.
+    local oracle
+    oracle="$(curl -fsS --max-time 25 -H "X-Owner-Key: $(cat "$KEY_FILE" 2>/dev/null)" \
+      "http://127.0.0.1:$PORT/v1/oracle?pair=BTC-USD" 2>/dev/null)" || oracle=""
+    if [ -n "$oracle" ]; then
+      case "$oracle" in
+        *'"can_settle": true'*|*'"can_settle":true'*)
+          ok "Price feeds OK — markets can settle." ;;
+        *)
+          warn "PRICE FEEDS ARE DOWN — markets will take bets and never resolve."
+          echo "     Run:  ./ikenga sources" ;;
+      esac
+    fi
+  else
+    warn "Not running."
+  fi
+}
+
+tests() {
+  ensure_deps
+  say "Unit tests..."
+  ( cd "$ENGINE" && cargo test --release 2>&1 | grep -E 'test result|FAILED' )
+  ( cd "$ENGINE" && cargo build --release >/dev/null 2>&1 )
+  # autopilot_test is excluded from the default run on purpose: it waits out real market
+  # cycles and takes about five minutes. Run it with ./ikenga test-autopilot.
+  for t in market_test credits_test onboarding_test route_test crash_test forecast_test attack_test agentapi_test challenge_test rationality_test; do
+    say "$t..."
+    ( cd "$ENGINE" && python3 "$t.py" 2>&1 | tail -1 )
+    sleep 1
+  done
+}
+
+demo() {
+  running || start
+  ensure_deps
+  say "Creating example markets..."
+  python3 "$ROOT/seed_demo.py" "$PORT" "$(cat "$KEY_FILE")"
+  echo
+  ok "Done — reload the dashboard at http://localhost:$PORT/dashboard"
+}
+
+
+doctor() {
+  echo
+  say "Checking your setup..."
+  echo
+  local problems=0
+
+  probe() { # name, command, fix
+    if eval "$2" >/dev/null 2>&1; then ok "$1"; else
+      printf '\033[31m✗\033[0m %s\n   fix: %s\n' "$1" "$3"; problems=$((problems+1))
+    fi
+  }
+
+  probe "bash"    "test -n \"\$BASH_VERSION\"" "run this with: bash ./ikenga doctor"
+  probe "curl"    "command -v curl"    "sudo apt-get install -y curl"
+  probe "python3" "command -v python3" "sudo apt-get install -y python3"
+  probe "unzip"   "command -v unzip"   "sudo apt-get install -y unzip"
+  probe "openssl" "command -v openssl" "sudo apt-get install -y openssl"
+
+  if load_rust; then ok "rust ($(cargo --version 2>/dev/null | cut -d' ' -f2))"
+  else
+    printf '\033[31m✗\033[0m rust\n   fix: curl https://sh.rustup.rs -sSf | sh -s -- -y && source \$HOME/.cargo/env\n'
+    problems=$((problems+1))
+  fi
+
+  echo
+  if [ -x "$BIN" ]; then ok "built"; else warn "not built yet — ./ikenga start will build it"; fi
+  if [ -s "$KEY_FILE" ]; then ok "owner key present (data/owner.key)"; else warn "no owner key yet — made on first start"; fi
+  if [ -f "$WAL" ]; then ok "data file present ($(wc -c < "$WAL" | tr -d ' ') bytes)"; else warn "no data yet"; fi
+
+  echo
+  if running; then
+    ok "running (pid $(cat "$PID_FILE"))"
+    if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      ok "answering on port $PORT"
+      echo "   $(curl -fsS "http://127.0.0.1:$PORT/health")"
+    else
+      printf '\033[31m✗\033[0m process is up but not answering on port %s\n   fix: ./ikenga restart, then check ./ikenga logs\n' "$PORT"
+      problems=$((problems+1))
+    fi
+  else
+    warn "not running — ./ikenga start"
+    if [ -f "$LOG" ]; then echo; echo "   last lines of data/ikenga.log:"; tail -8 "$LOG" | sed 's/^/   /'; fi
+  fi
+
+  echo
+  if [ "$problems" -eq 0 ]; then
+    ok "Nothing wrong that I can see."
+    echo
+    echo "  If the dashboard still will not open, it is almost certainly the address, not the"
+    echo "  server. It listens on $BIND."
+    [ "${IKENGA_PUBLIC:-0}" != "1" ] && echo "  Only this machine can reach it. To reach it from your phone: IKENGA_PUBLIC=1 ./ikenga restart"
+    echo "  In Google Cloud Shell use the web-preview button and set the port to $PORT."
+  else
+    printf '\033[31m%s problem(s) above.\033[0m Fix those, then: ./ikenga start\n' "$problems"
+  fi
+  echo
+}
+
+
+# Turns a running copy into a real deployment: starts on boot, restarts if it dies, reachable
+# from outside. Everything here is the stuff that separates "it works while I'm watching" from
+# "it is up".
+install_service() {
+  ensure_key
+  [ -x "$BIN" ] || build
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    die "This machine does not use systemd, so there is nothing here to install into.
+  Keep it running with: IKENGA_PUBLIC=1 ./ikenga start"
+  fi
+  local sudo_cmd=""
+  if [ "$(id -u)" != "0" ]; then
+    command -v sudo >/dev/null 2>&1 || die "Need root (or sudo) to install a service."
+    sudo_cmd="sudo"
+  fi
+
+  local unit=/etc/systemd/system/ikenga.service
+  say "Writing $unit"
+  $sudo_cmd tee "$unit" > /dev/null <<UNIT
+[Unit]
+Description=Ikenga prediction market
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$(id -un)
+WorkingDirectory=$ROOT
+# Quoted, every one of them: systemd splits an unquoted Environment= value on whitespace,
+# so a price-feed list written with a space after the semicolon would silently lose everything
+# after the first entry — leaving the venue running on one unverified source.
+Environment="PORT=$PORT"
+Environment="IKENGA_BIND=0.0.0.0:$PORT"
+Environment="IKENGA_OWNER_KEY=$(cat "$KEY_FILE")"
+Environment="IKENGA_WAL_PATH=$WAL"
+Environment="IKENGA_WAL_SYNC=${IKENGA_WAL_SYNC:-always}"
+Environment="IKENGA_REAL_MONEY=${IKENGA_REAL_MONEY:-0}"
+Environment="IKENGA_ROUTE_SOURCES=${IKENGA_ROUTE_SOURCES:-coinbase; kraken; gemini; bitstamp}"
+Environment="IKENGA_AUTOPILOT=${IKENGA_AUTOPILOT:-BTC-USD:600@-50,0,+50, ETH-USD:900@-75,0,+75}"
+Environment="IKENGA_TRUSTED_PROXIES=${IKENGA_TRUSTED_PROXIES:-}"
+Environment="IKENGA_PUBLIC_URL=${IKENGA_PUBLIC_URL:-}"
+Environment="IKENGA_SEED_PER_MARKET=${IKENGA_SEED_PER_MARKET:-25}"
+Environment="IKENGA_SEED_BANKROLL=${IKENGA_SEED_BANKROLL:-10000}"
+ExecStart=$BIN
+Restart=always
+RestartSec=3
+# The owner key is in this file, so it is readable only by root.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  $sudo_cmd chmod 600 "$unit"
+
+  # The launcher's own pid file would fight systemd over who owns the process.
+  running && stop
+
+  $sudo_cmd systemctl daemon-reload
+  $sudo_cmd systemctl enable ikenga >/dev/null 2>&1 || true
+  $sudo_cmd systemctl restart ikenga
+
+  if command -v ufw >/dev/null 2>&1; then
+    say "Opening port $PORT in the firewall"
+    $sudo_cmd ufw allow "$PORT"/tcp >/dev/null 2>&1 || warn "could not add the firewall rule"
+  else
+    warn "No ufw here — if this machine has a firewall, open port $PORT yourself."
+  fi
+
+  sleep 3
+  local ip
+  ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo YOUR_SERVER_IP)"
+  echo
+  if $sudo_cmd systemctl is-active --quiet ikenga; then
+    ok "Installed and running. It will come back after a reboot or a crash."
+    echo
+    echo "  Dashboard   http://$ip:$PORT/dashboard"
+    echo "  Owner key   $(cat "$KEY_FILE")"
+    echo
+    echo "  Status      sudo systemctl status ikenga"
+    echo "  Logs        sudo journalctl -u ikenga -f"
+    echo "  Restart     sudo systemctl restart ikenga"
+    echo
+    warn "Anyone who reaches this address can see the login box. Only the owner key gets in."
+  else
+    warn "Installed, but it is not running. Check: sudo journalctl -u ikenga -n 40"
+    exit 1
+  fi
+}
+
+tunnel() {
+  # One command from "running on this machine" to "an HTTPS link you can send someone".
+  #
+  # This used to stop halfway: it printed an address and then asked the operator to stop the
+  # venue and start it again with two environment variables set. Both of them matter — without
+  # IKENGA_PUBLIC_URL every agent is handed the wrong address, and without IKENGA_TRUSTED_PROXIES
+  # every visitor arrives from the tunnel's own address, so the whole internet shares one
+  # rate-limit bucket and the sixth person to open the link is refused. A two-step fix where the
+  # second step is optional-looking is a fix that half the time does not happen.
+  #
+  # So it does both steps itself.
+  local bin="$DATA/cloudflared"
+  if [ ! -x "$bin" ]; then
+    local arch; arch="$(uname -m)"
+    case "$arch" in
+      x86_64|amd64) arch=amd64 ;;
+      aarch64|arm64) arch=arm64 ;;
+      *) warn "No cloudflared build for $arch. See the HTTPS section of RUN.md."; exit 1 ;;
+    esac
+    echo "Fetching cloudflared (one time)..."
+    curl -fsSL -o "$bin" \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" \
+      || { warn "Download failed. Check this machine has internet access."; exit 1; }
+    chmod +x "$bin"
+  fi
+
+  running || start
+
+  local tlog="$DATA/tunnel.log"
+  : > "$tlog"
+  echo "Opening a public HTTPS address..."
+  "$bin" tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate > "$tlog" 2>&1 &
+  local tpid=$!
+  echo "$tpid" > "$DATA/tunnel.pid"
+
+  # Closing the terminal should not leave a tunnel running with nothing behind it.
+  trap 'kill "$tpid" 2>/dev/null; rm -f "$DATA/tunnel.pid" "$DATA/tunnel.url"; exit 0' INT TERM
+
+  local url="" i=0
+  while [ $i -lt 90 ]; do
+    kill -0 "$tpid" 2>/dev/null || { warn "The tunnel exited. Last lines:"; tail -12 "$tlog"; exit 1; }
+    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$tlog" 2>/dev/null | head -1)"
+    [ -n "$url" ] && break
+    sleep 1; i=$((i+1))
+  done
+  if [ -z "$url" ]; then
+    warn "No address after 90s. Last lines:"; tail -12 "$tlog"
+    kill "$tpid" 2>/dev/null; exit 1
+  fi
+  echo "$url" > "$DATA/tunnel.url"
+
+  # Now the half that used to be left to the reader.
+  echo "Pointing the venue at $url ..."
+  stop >/dev/null 2>&1 || true
+  IKENGA_PUBLIC_URL="$url" IKENGA_TRUSTED_PROXIES=all start >/dev/null 2>&1 || {
+    warn "The venue did not come back up. Last lines:"; tail -20 "$LOG"
+    kill "$tpid" 2>/dev/null; exit 1
+  }
+
+  # Prove it end to end rather than assuming: fetch the tool list through the tunnel and check
+  # the venue is advertising the address agents should actually use.
+  local advertised=""
+  advertised="$(curl -fsS --max-time 20 "$url/v1/tools" 2>/dev/null \
+    | grep -oE '"base_url"[^,]*' | grep -oE 'https://[^"]+' | head -1)"
+
+  echo
+  printf '\033[32m╭──────────────────────────────────────────────────────────╮\033[0m\n'
+  printf '\033[32m│  You are live on the internet, over HTTPS                │\033[0m\n'
+  printf '\033[32m╰──────────────────────────────────────────────────────────╯\033[0m\n'
+  echo
+  echo "  Send people      $url/bet"
+  echo "  Send bot makers  $url/build"
+  echo "  Agents read      $url/v1/tools"
+  echo
+  if [ "$advertised" = "$url" ]; then
+    printf '  \033[32m✓\033[0m Reachable, and it is handing agents the right address.\n'
+  else
+    warn "The venue answered but advertises '$advertised'. Agents may be sent the wrong way."
+  fi
+  printf '  \033[32m✓\033[0m Visitors are told apart properly (trusted-proxy mode on).\n'
+  echo
+  echo "  This address dies when you press Ctrl-C or close this window."
+  echo "  For one that stays, you need a domain — see RUN.md."
+  echo
+  echo "  Leave this open. Ctrl-C closes the tunnel."
+  echo
+
+  wait "$tpid"
+}
+
+case "${1:-start}" in
+  start)  start ;;
+  stop)   stop ;;
+  restart) stop 2>/dev/null || true; start ;;
+  status) status ;;
+  logs)   tail -f "$LOG" ;;
+  build)  build ;;
+  sources)
+    # The price feeds are the oracle. A silent misconfiguration means markets never settle, so
+    # this asks every configured source directly and prints what came back.
+    [ -x "$BIN" ] || build
+    # A non-zero exit here is the *answer* ("not configured", "they disagree"), not a crash, so
+    # the error trap must not stack a "something went wrong, run doctor" on top of a report that
+    # already said precisely what is wrong and how to fix it.
+    trap - ERR
+    if [ -n "${IKENGA_ROUTE_SOURCES+set}" ]; then export IKENGA_ROUTE_SOURCES; fi
+    "$BIN" --check-sources "${2:-BTC-USD}"
+    exit $?
+    ;;
+  fuzz)
+    ensure_deps
+    say "Fuzzing for ${2:-60}s — malformed everything, checking it never crashes or moves money..."
+    ( cd "$ENGINE" && python3 fuzz_test.py "${2:-60}" )
+    ;;
+  test|tests) tests ;;
+  test-autopilot)
+    ensure_deps
+    say "Autopilot end-to-end (about five minutes — it waits out real market cycles)..."
+    ( cd "$ENGINE" && python3 autopilot_test.py )
+    ;;
+  demo)   demo ;;
+  key)    ensure_key; cat "$KEY_FILE" ;;
+  doctor) doctor ;;
+  tunnel) tunnel ;;
+  simulate)
+    # Hundreds of participants using every feature at once, at rising volume, with money
+    # conservation checked continuously. Different question from the test suites: not "does this
+    # feature work" but "what breaks when it is all used together, fast, in an order nobody
+    # planned".
+    ensure_deps
+    ( cd "$ENGINE" && python3 -c "import cryptography" 2>/dev/null ) \
+      || { warn "Needs the python 'cryptography' package:  pip install cryptography"; exit 1; }
+    ( cd "$ENGINE" && python3 simulate.py "${2:-1}" )
+    ;;
+  install-service) install_service ;;
+  *) echo "usage: ./ikenga {start|stop|restart|status|logs|build|test|test-autopilot|demo|key|doctor|sources|tunnel|fuzz|simulate|install-service}"; exit 1 ;;
+esac

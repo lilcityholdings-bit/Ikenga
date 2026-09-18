@@ -1,0 +1,29 @@
+[package]
+name = "ikenga-matching-engine"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE ON DEPENDENCIES — READ THIS BEFORE ADDING ANY:
+#
+# This crate deliberately has ZERO external dependencies. It was built in a sandboxed
+# environment with no network access to crates.io (or npm, or apt), so axum/tokio/
+# ed25519-dalek/serde/dashmap etc. — all specced in docs/ARCHITECTURE.md — could not be
+# fetched. Everything here (HTTP/1.1 parsing, a raw WebSocket server, JSON encode/decode,
+# SHA-256/HMAC-SHA256/SHA-1, base64) is hand-rolled std-only Rust so the project actually
+# compiles and runs without network access.
+#
+# Agent request signing is the one piece where "hand-roll it" would have meant writing
+# curve25519 field/point arithmetic from scratch — exactly the kind of code where a subtle bug
+# is a silent forgery vulnerability, not a compile error, and it can't be meaningfully checked
+# without a reference implementation to compare against. Instead src/ed25519.rs shells out to
+# the system `openssl` binary (present on the Dockerfile's base image — see its comment) for
+# real, audited Ed25519 sign/verify, at the cost of a process-spawn per signature check. See
+# docs/PERFORMANCE.md's "Ed25519 vs HMAC" section for that cost, measured.
+#
+# This is still not how the HTTP/WS layer should stay. See docs/ROADMAP.md "Phase 1" — the
+# hand-rolled HTTP/WS server should become axum + tokio once real network access exists to fetch
+# them. Enable network/package-registry access in your workspace's Admin Settings -> Capabilities,
+# then this file should gain real deps for that (Ed25519 can stay on openssl regardless — it's
+# already a real fix, not a stopgap).
+
+[dependencies]

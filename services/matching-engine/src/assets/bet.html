@@ -1,0 +1,993 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ikenga — place a bet</title>
+<style>
+  :root{
+    --bg:#faf8f3; --card:#fff; --raised:#f3efe6;
+    --ink:#1b1d23; --muted:#6b6659; --faint:#8d887c;
+    --line:#e4dece; --line2:#cfc7b2;
+    --accent:#9a6b10; --on-accent:#fff; --accent-soft:#f6ecd6;
+    --yes:#2c7a54; --yes-soft:#e6f2eb;
+    --no:#a63d2f;  --no-soft:#f8eae7;
+    --r:12px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0d0f14; --card:#161a22; --raised:#1d222c;
+      --ink:#e8ecf3; --muted:#9aa2b1; --faint:#7b8394;
+      --line:#252b36; --line2:#39414f;
+      --accent:#d4a03c; --on-accent:#14171d; --accent-soft:#221c10;
+      --yes:#3fb27f; --yes-soft:#12241c;
+      --no:#e0705c;  --no-soft:#2a1613;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,
+    "Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased;
+    padding:0 0 env(safe-area-inset-bottom);
+  }
+  .wrap{max-width:520px;margin:0 auto;padding:20px 16px 40px}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
+  h1{font-size:22px;margin:0;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:14px;margin:2px 0 20px}
+  .bal{
+    font-variant-numeric:tabular-nums;font-weight:600;font-size:14px;
+    background:var(--accent-soft);color:var(--accent);padding:5px 10px;border-radius:99px;
+    white-space:nowrap;
+  }
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+        padding:16px;margin-bottom:12px}
+  .q{font-weight:600;line-height:1.35;margin:0 0 4px}
+  .meta{color:var(--faint);font-size:12.5px;margin-bottom:12px;font-variant-numeric:tabular-nums}
+  .sides{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  button.side{
+    font:inherit;font-weight:600;text-align:left;cursor:pointer;
+    border:1px solid var(--line2);border-radius:10px;padding:11px 12px;
+    background:var(--raised);color:var(--ink);
+    display:flex;flex-direction:column;gap:2px;min-height:60px;
+  }
+  button.side:active{transform:translateY(1px)}
+  button.side .nm{font-size:14px}
+  button.side .pc{font-size:19px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  button.side.y{background:var(--yes-soft);border-color:var(--yes);color:var(--yes)}
+  button.side.n{background:var(--no-soft);border-color:var(--no);color:var(--no)}
+  button.side[disabled]{opacity:.5;cursor:not-allowed}
+
+  .cta{
+    font:inherit;font-size:17px;font-weight:600;width:100%;
+    background:var(--accent);color:var(--on-accent);border:0;border-radius:10px;
+    padding:15px;cursor:pointer;
+  }
+  .cta[disabled]{opacity:.55;cursor:progress}
+  .ghost{background:none;border:1px solid var(--line2);color:var(--muted);
+         font:inherit;font-size:14px;padding:9px 12px;border-radius:8px;cursor:pointer}
+
+  /* bet sheet */
+  .scrim{position:fixed;inset:0;background:#0008;display:none;align-items:flex-end;z-index:9}
+  .scrim.on{display:flex}
+  .sheet{background:var(--card);width:100%;max-width:520px;margin:0 auto;
+         border-radius:16px 16px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom));
+         border-top:1px solid var(--line);max-height:90vh;overflow-y:auto}
+  .grab{width:38px;height:4px;background:var(--line2);border-radius:9px;margin:0 auto 14px}
+  .amt{display:flex;align-items:center;gap:10px;margin:14px 0}
+  .amt input{
+    font:inherit;font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;
+    width:100%;padding:11px 13px;border:1px solid var(--line2);border-radius:10px;
+    background:var(--bg);color:var(--ink);-moz-appearance:textfield;
+  }
+  .amt input::-webkit-outer-spin-button,.amt input::-webkit-inner-spin-button{
+    -webkit-appearance:none;margin:0}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .chip{font:inherit;font-size:13px;padding:6px 11px;border-radius:99px;
+        border:1px solid var(--line2);background:var(--raised);color:var(--muted);cursor:pointer}
+  .rows{border-top:1px solid var(--line);margin:2px 0 14px}
+  .row{display:flex;justify-content:space-between;gap:14px;padding:9px 0;
+       border-bottom:1px solid var(--line);font-size:14.5px}
+  .row b{font-variant-numeric:tabular-nums;font-weight:600}
+  .row.hi b{color:var(--accent)}
+  .warn{background:var(--no-soft);color:var(--no);border-radius:8px;padding:9px 11px;
+        font-size:13.5px;margin-bottom:10px}
+  .ok{color:var(--yes)}
+
+  .lbl{display:block;font-size:12.5px;font-weight:600;color:var(--muted);margin:0 0 5px}
+  .fld{width:100%;font:inherit;font-size:16px;padding:11px 12px;border-radius:9px;
+       border:1px solid var(--line2);background:var(--bg);color:var(--ink);margin-bottom:14px}
+  select.fld{appearance:none}
+  .chal{border-left:3px solid var(--accent)}
+  .odds{display:flex;gap:14px;margin:10px 0 12px;font-size:13.5px;color:var(--muted);flex-wrap:wrap}
+  .odds b{color:var(--ink);font-variant-numeric:tabular-nums}
+  button.side.picked{outline:2px solid var(--accent);outline-offset:1px}
+  .rec{display:flex;gap:16px;flex-wrap:wrap;margin:-10px 0 18px;font-size:13.5px;color:var(--muted)}
+  .rec b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .rec .ok{color:var(--yes);font-weight:600}
+  .empty{color:var(--muted);text-align:center;padding:34px 10px;font-size:15px}
+  .pos{display:flex;justify-content:space-between;gap:12px;padding:11px 0;
+       border-bottom:1px solid var(--line);font-size:14.5px}
+  .pos:last-child{border-bottom:0}
+  .pos .l{min-width:0}
+  .pos .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pos .s{color:var(--faint);font-size:12.5px}
+  .pos .r{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .tabs{display:flex;gap:6px;margin:22px 0 12px}
+  .tab{font:inherit;font-size:14px;font-weight:600;padding:8px 14px;border-radius:99px;
+       border:1px solid var(--line);background:none;color:var(--muted);cursor:pointer}
+  .tab.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-soft)}
+  footer{color:var(--faint);font-size:12.5px;margin-top:30px;padding-top:14px;
+         border-top:1px solid var(--line);line-height:1.6}
+  footer a{color:var(--accent)}
+  code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+       background:var(--raised);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Ikenga</h1>
+    <span class="bal" id="bal" hidden></span>
+  </header>
+  <p class="sub" id="sub">Forecast something. Put a little behind it. Get paid if you were right.</p>
+  <div class="rec" id="record" hidden></div>
+
+  <div id="start" class="card" hidden>
+    <p style="margin:0 0 6px;font-weight:600">Start with 1,000 points</p>
+    <p style="margin:0 0 14px;color:var(--muted);font-size:14.5px">
+      No email, no password, no wallet. Your phone makes a key, keeps it, and that is your account.
+      Points are free and cannot be cashed out — they are for seeing whether you are any good at
+      this.
+    </p>
+    <button class="cta" id="go">Create my key</button>
+    <button class="ghost" id="haskey" style="width:100%;margin-top:8px">I already have a key</button>
+    <p style="margin:12px 0 0;color:var(--faint);font-size:12.5px" id="startnote"></p>
+  </div>
+
+  <div id="insecure" class="card" hidden
+       style="border-color:var(--no);background:var(--no-soft)">
+    <p style="margin:0 0 6px;font-weight:600;color:var(--no)">This page isn't encrypted</p>
+    <p style="margin:0;color:var(--no);font-size:14.5px">
+      You reached it over plain <code>http://</code>, so anyone on the same network can read and
+      change what you send. Betting still works and your key never leaves this device, but on an
+      untrusted network — a café, an airport — assume someone could tamper with this page. Points
+      have no cash value, so there is nothing here worth stealing yet. Ask whoever runs this venue
+      to put it behind HTTPS.
+    </p>
+  </div>
+
+  <div id="unsupported" class="card" hidden>
+    <p style="margin:0 0 6px;font-weight:600">Something went wrong making a key</p>
+    <p style="margin:0;color:var(--muted);font-size:14.5px" id="unsupportedwhy"></p>
+  </div>
+
+  <div class="tabs" id="tabs" hidden>
+    <button class="tab on" data-t="board">Markets</button>
+    <button class="tab" data-t="chal">Head to head</button>
+    <button class="tab" data-t="mine">My bets</button>
+  </div>
+
+  <div id="board"></div>
+  <div id="chal" hidden></div>
+  <div id="mine" hidden></div>
+
+  <div class="card" id="backupcard" hidden style="margin-top:22px">
+    <p style="margin:0 0 6px;font-weight:600">Keep a copy of your key</p>
+    <p style="margin:0 0 12px;color:var(--muted);font-size:14.5px">
+      Your account is a key in this browser and nowhere else. Clearing site data, switching
+      phones, or using a private window loses it, and nobody can bring it back — not even whoever
+      runs this venue, because they never had it. Save this text somewhere and you can restore
+      the account on any device.
+    </p>
+    <textarea id="backup" readonly rows="3"
+      style="width:100%;font:12px ui-monospace,Menlo,monospace;padding:10px;border-radius:8px;
+             border:1px solid var(--line2);background:var(--bg);color:var(--ink);resize:vertical"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="ghost" id="copykey" style="flex:1">Copy my key</button>
+      <button class="ghost" id="hidekey" style="flex:1">Hide</button>
+    </div>
+    <p style="margin:10px 0 0;color:var(--faint);font-size:12.5px">
+      Anyone who has this text controls the account. Treat it like a password.
+    </p>
+  </div>
+
+  <div class="card" id="restorecard" hidden style="margin-top:12px">
+    <p style="margin:0 0 6px;font-weight:600">Already have a key?</p>
+    <textarea id="restorebox" rows="3" placeholder="Paste the key you saved"
+      style="width:100%;font:12px ui-monospace,Menlo,monospace;padding:10px;border-radius:8px;
+             border:1px solid var(--line2);background:var(--bg);color:var(--ink);resize:vertical"></textarea>
+    <button class="ghost" id="dorestore" style="width:100%;margin-top:8px">Restore it</button>
+    <p style="margin:8px 0 0;color:var(--no);font-size:13px" id="restoreerr"></p>
+  </div>
+
+  <footer>
+    <span id="foot"></span><br>
+    <a href="#" id="showbackup">Back up or restore your key</a> — it lives only in this browser.<br>
+    Building a bot? <a href="/v1/tools">/v1/tools</a> · <a href="/v1/spec">/v1/spec</a>
+  </footer>
+</div>
+
+<div class="scrim" id="newchal">
+  <div class="sheet">
+    <div class="grab"></div>
+    <p class="q">Bet on anything</p>
+    <p class="meta">Write the question, put money on your side. It goes live the moment anyone —
+      person or bot — puts up the other side. If nobody does, you get every point back.</p>
+    <label class="lbl">The question</label>
+    <input id="cq" class="fld" placeholder="Will it rain in Lagos tomorrow?" maxlength="200">
+    <label class="lbl">How you'll both know who won</label>
+    <input id="ch" class="fld" placeholder="The Lagos airport observation at noon" maxlength="200">
+    <p style="margin:-8px 0 14px;color:var(--faint);font-size:12.5px">
+      After it happens, you both say what the answer was. Agree and it pays straight away.
+      Disagree, or they go quiet, and it voids — you both get your money back. Neither of you can
+      decide it alone.</p>
+    <label class="lbl">You're betting</label>
+    <div class="sides" style="margin-bottom:14px">
+      <button class="side y picked" id="cyes"><span class="nm">YES</span></button>
+      <button class="side n" id="cno"><span class="nm">NO</span></button>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1">
+        <label class="lbl">You risk</label>
+        <input id="cmine" class="fld" type="number" inputmode="decimal" value="25" min="1">
+      </div>
+      <div style="flex:1">
+        <label class="lbl">They put up</label>
+        <input id="ctheirs" class="fld" type="number" inputmode="decimal" value="25" min="1">
+      </div>
+    </div>
+    <label class="lbl">Betting closes in</label>
+    <select id="cwhen" class="fld">
+      <option value="900000">15 minutes</option>
+      <option value="3600000" selected>1 hour</option>
+      <option value="21600000">6 hours</option>
+      <option value="86400000">1 day</option>
+      <option value="604800000">1 week</option>
+    </select>
+    <div id="cwarn"></div>
+    <button class="cta" id="cgo" style="margin-top:4px">Post it</button>
+    <button class="ghost" id="ccancel" style="width:100%;margin-top:8px">Cancel</button>
+  </div>
+</div>
+
+<div class="scrim" id="scrim">
+  <div class="sheet" id="sheet">
+    <div class="grab"></div>
+    <p class="q" id="sq"></p>
+    <p class="meta" id="ss"></p>
+    <div class="amt">
+      <input id="amount" type="number" inputmode="decimal" min="1" step="1" value="25">
+      <span style="color:var(--muted);font-weight:600" id="asset">PTS</span>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="warns"></div>
+    <div class="rows" id="rows"></div>
+    <button class="cta" id="place">Place bet</button>
+    <button class="ghost" id="cancel" style="width:100%;margin-top:8px">Cancel</button>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const enc = new TextEncoder();
+const KEY = "ikenga.identity.v1";
+let me = null, priv = null, markets = [], sheet = null, quoteTimer = null;
+
+// ---- Ed25519 without WebCrypto ---------------------------------------------------------------
+// Ed25519 with nothing but BigInt, for browsers where crypto.subtle does not exist.
+//
+// crypto.subtle is gated behind a "secure context": HTTPS, or localhost. A venue served over
+// plain http:// on its own IP — which is exactly how this one starts life — has no subtle at all,
+// so the whole page could not sign a single request and told visitors their browser was too old.
+// This is the fallback that makes that untrue. WebCrypto is still preferred when present.
+
+const P = (1n << 255n) - 19n;
+const N = (1n << 252n) + 27742317777372353535851937790883648493n;
+const D = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+const Gx = 15112221349535400772501151409588531511454012693041857206046113283949847762202n;
+const Gy = 46316835694926478169428394003475163141307993866256225615783033603165251855960n;
+
+const mod = (a, m = P) => { const r = a % m; return r >= 0n ? r : r + m; };
+function pw(b, e, m = P) { let r = 1n; b = mod(b, m); while (e > 0n) { if (e & 1n) r = mod(r * b, m); b = mod(b * b, m); e >>= 1n; } return r; }
+const inv = a => pw(a, P - 2n);
+
+// Extended twisted Edwards coordinates: [X, Y, Z, T] with x = X/Z, y = Y/Z, xy = T/Z.
+const ZERO = [0n, 1n, 1n, 0n];
+const G = [Gx, Gy, 1n, mod(Gx * Gy)];
+
+function padd(p, q) {
+  const [X1, Y1, Z1, T1] = p, [X2, Y2, Z2, T2] = q;
+  const A = mod((Y1 - X1) * (Y2 - X2));
+  const B = mod((Y1 + X1) * (Y2 + X2));
+  const C = mod(T1 * 2n * D * T2);
+  const Dd = mod(Z1 * 2n * Z2);
+  const E = B - A, F = Dd - C, Gg = Dd + C, H = B + A;
+  return [mod(E * F), mod(Gg * H), mod(F * Gg), mod(E * H)];
+}
+
+function pmul(p, k) {
+  let r = ZERO, a = p;
+  while (k > 0n) { if (k & 1n) r = padd(r, a); a = padd(a, a); k >>= 1n; }
+  return r;
+}
+
+function encodePoint(p) {
+  const [X, Y, Z] = p;
+  const zi = inv(Z);
+  const x = mod(X * zi), y = mod(Y * zi);
+  const out = new Uint8Array(32);
+  let t = y;
+  for (let i = 0; i < 32; i++) { out[i] = Number(t & 0xffn); t >>= 8n; }
+  out[31] |= Number(x & 1n) << 7;   // sign of x rides in the top bit
+  return out;
+}
+
+const leToBig = b => { let n = 0n; for (let i = b.length - 1; i >= 0; i--) n = (n << 8n) | BigInt(b[i]); return n; };
+const bigToLe = (n, len) => { const o = new Uint8Array(len); for (let i = 0; i < len; i++) { o[i] = Number(n & 0xffn); n >>= 8n; } return o; };
+
+// ---- SHA-512, because Ed25519 needs it and subtle is what we are doing without ----------------
+const KC = [
+  "428a2f98d728ae22","7137449123ef65cd","b5c0fbcfec4d3b2f","e9b5dba58189dbbc","3956c25bf348b538",
+  "59f111f1b605d019","923f82a4af194f9b","ab1c5ed5da6d8118","d807aa98a3030242","12835b0145706fbe",
+  "243185be4ee4b28c","550c7dc3d5ffb4e2","72be5d74f27b896f","80deb1fe3b1696b1","9bdc06a725c71235",
+  "c19bf174cf692694","e49b69c19ef14ad2","efbe4786384f25e3","0fc19dc68b8cd5b5","240ca1cc77ac9c65",
+  "2de92c6f592b0275","4a7484aa6ea6e483","5cb0a9dcbd41fbd4","76f988da831153b5","983e5152ee66dfab",
+  "a831c66d2db43210","b00327c898fb213f","bf597fc7beef0ee4","c6e00bf33da88fc2","d5a79147930aa725",
+  "06ca6351e003826f","142929670a0e6e70","27b70a8546d22ffc","2e1b21385c26c926","4d2c6dfc5ac42aed",
+  "53380d139d95b3df","650a73548baf63de","766a0abb3c77b2a8","81c2c92e47edaee6","92722c851482353b",
+  "a2bfe8a14cf10364","a81a664bbc423001","c24b8b70d0f89791","c76c51a30654be30","d192e819d6ef5218",
+  "d69906245565a910","f40e35855771202a","106aa07032bbd1b8","19a4c116b8d2d0c8","1e376c085141ab53",
+  "2748774cdf8eeb99","34b0bcb5e19b48a8","391c0cb3c5c95a63","4ed8aa4ae3418acb","5b9cca4f7763e373",
+  "682e6ff3d6b2b8a3","748f82ee5defb2fc","78a5636f43172f60","84c87814a1f0ab72","8cc702081a6439ec",
+  "90befffa23631e28","a4506cebde82bde9","bef9a3f7b2c67915","c67178f2e372532b","ca273eceea26619c",
+  "d186b8c721c0c207","eada7dd6cde0eb1e","f57d4f7fee6ed178","06f067aa72176fba","0a637dc5a2c898a6",
+  "113f9804bef90dae","1b710b35131c471b","28db77f523047d84","32caab7b40c72493","3c9ebe0a15c9bebc",
+  "431d67c49c100d4c","4cc5d4becb3e42b6","597f299cfc657e2a","5fcb6fab3ad6faec","6c44198c4a475817",
+].map(h => BigInt("0x" + h));
+
+const M64 = (1n << 64n) - 1n;
+const rotr = (x, n) => ((x >> n) | (x << (64n - n))) & M64;
+
+function sha512(msg) {
+  let h = ["6a09e667f3bcc908","bb67ae8584caa73b","3c6ef372fe94f82b","a54ff53a5f1d36f1",
+           "510e527fade682d1","9b05688c2b3e6c1f","1f83d9abfb41bd6b","5be0cd19137e2179"]
+          .map(x => BigInt("0x" + x));
+  const bitLen = BigInt(msg.length) * 8n;
+  const padLen = ((111 - msg.length) % 128 + 128) % 128 + 1;
+  const buf = new Uint8Array(msg.length + padLen + 16);
+  buf.set(msg); buf[msg.length] = 0x80;
+  let bl = bitLen;
+  for (let i = buf.length - 1; i >= buf.length - 16; i--) { buf[i] = Number(bl & 0xffn); bl >>= 8n; }
+
+  const w = new Array(80);
+  for (let off = 0; off < buf.length; off += 128) {
+    for (let i = 0; i < 16; i++) {
+      let v = 0n;
+      for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(buf[off + i * 8 + j]);
+      w[i] = v;
+    }
+    for (let i = 16; i < 80; i++) {
+      const s0 = rotr(w[i-15],1n) ^ rotr(w[i-15],8n) ^ (w[i-15] >> 7n);
+      const s1 = rotr(w[i-2],19n) ^ rotr(w[i-2],61n) ^ (w[i-2] >> 6n);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) & M64;
+    }
+    let [a,b,c,d,e,f,g,hh] = h;
+    for (let i = 0; i < 80; i++) {
+      const S1 = rotr(e,14n) ^ rotr(e,18n) ^ rotr(e,41n);
+      const ch = (e & f) ^ (~e & M64 & g);
+      const t1 = (hh + S1 + ch + KC[i] + w[i]) & M64;
+      const S0 = rotr(a,28n) ^ rotr(a,34n) ^ rotr(a,39n);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) & M64;
+      hh=g; g=f; f=e; e=(d+t1)&M64; d=c; c=b; b=a; a=(t1+t2)&M64;
+    }
+    h = [h[0]+a, h[1]+b, h[2]+c, h[3]+d, h[4]+e, h[5]+f, h[6]+g, h[7]+hh].map(x => x & M64);
+  }
+  const out = new Uint8Array(64);
+  h.forEach((v, i) => { for (let j = 7; j >= 0; j--) { out[i*8+j] = Number(v & 0xffn); v >>= 8n; } });
+  return out;
+}
+
+function clamp(h) {
+  const a = h.slice(0, 32);
+  a[0] &= 248; a[31] &= 127; a[31] |= 64;
+  return leToBig(a);
+}
+
+function publicFromSeed(seed) {
+  return encodePoint(pmul(G, clamp(sha512(seed))));
+}
+
+function edSign(seed, msg) {
+  const h = sha512(seed);
+  const a = clamp(h);
+  const A = encodePoint(pmul(G, a));
+  const prefix = h.slice(32, 64);
+  const rIn = new Uint8Array(prefix.length + msg.length);
+  rIn.set(prefix); rIn.set(msg, prefix.length);
+  const r = mod(leToBig(sha512(rIn)), N);
+  const R = encodePoint(pmul(G, r));
+  const kIn = new Uint8Array(64 + msg.length);
+  kIn.set(R); kIn.set(A, 32); kIn.set(msg, 64);
+  const k = mod(leToBig(sha512(kIn)), N);
+  const S = mod(r + k * a, N);
+  const sig = new Uint8Array(64);
+  sig.set(R); sig.set(bigToLe(S, 32), 32);
+  return sig;
+}
+
+// ---- signing -------------------------------------------------------------------------------
+// Two backends. WebCrypto when the page is in a secure context (HTTPS or localhost), and the
+// BigInt implementation above when it is not.
+//
+// That fallback is not a nicety. `crypto.subtle` is absent entirely outside a secure context, so
+// served from its own IP over plain http:// — which is how this venue starts life, before anyone
+// has bought a domain or a certificate — the page could not sign a single request. It told
+// visitors their browser was too old, which was false and unfixable by them. Now it just works,
+// and HTTPS becomes an upgrade rather than a prerequisite.
+const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const subtleOk = () => !!(window.crypto && window.crypto.subtle && window.isSecureContext);
+
+// crypto.getRandomValues IS available without a secure context; only subtle is gated.
+const randomSeed = () => crypto.getRandomValues(new Uint8Array(32));
+
+let backend = "webcrypto";
+
+async function newIdentity() {
+  if (subtleOk()) {
+    try {
+      const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+      const pk8 = await crypto.subtle.exportKey("pkcs8", kp.privateKey);
+      const raw = await crypto.subtle.exportKey("raw", kp.publicKey);
+      backend = "webcrypto";
+      return { priv: kp.privateKey, seedHex: b64(pk8), pubkey_hex: hex(raw), kind: "pkcs8" };
+    } catch (e) { /* Ed25519 missing from this WebCrypto build — fall through */ }
+  }
+  const seed = randomSeed();
+  backend = "bigint";
+  return { priv: seed, seedHex: hex(seed), pubkey_hex: hex(publicFromSeed(seed)), kind: "seed" };
+}
+
+async function loadPriv(stored, kind) {
+  if (kind === "seed") { backend = "bigint"; return Uint8Array.from(stored.match(/../g).map(h => parseInt(h, 16))); }
+  backend = "webcrypto";
+  return crypto.subtle.importKey("pkcs8", unb64(stored), { name: "Ed25519" }, true, ["sign"]);
+}
+
+async function signBytes(bytes) {
+  if (backend === "bigint") return hex(edSign(priv, bytes));
+  return hex(await crypto.subtle.sign({ name: "Ed25519" }, priv, bytes));
+}
+
+// The server's clock, minus this device's. A phone that is a minute out would otherwise have every
+// single request rejected as stale, with nothing on screen to explain why — and a person cannot
+// fix their phone's clock from a betting page. Measured once at boot and applied to every stamp.
+let clockOffsetMs = 0;
+
+async function call(method, path, bodyObj, signed) {
+  // Serialise ONCE. This exact string is what gets signed and what gets sent.
+  const raw = bodyObj === undefined ? "" : JSON.stringify(bodyObj);
+  const headers = raw ? { "Content-Type": "application/json" } : {};
+  if (signed) {
+    const ts = new Date(Date.now() + clockOffsetMs).toISOString().replace(/\.\d+Z$/, "Z");
+    const nonce = (crypto.randomUUID ? crypto.randomUUID() : hex(randomSeed()));
+    Object.assign(headers, {
+      "X-Agent-ID": (me && me.agent_id) || "registration",
+      "X-Timestamp": ts, "X-Nonce": nonce,
+      "X-Signature": await signBytes(enc.encode(method + path + ts + nonce + raw)),
+    });
+  }
+  const r = await fetch(path, { method, headers, body: raw || undefined });
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  return { status: r.status, data };
+}
+
+// ---- rendering -----------------------------------------------------------------------------
+const money = n => (Math.round(n * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const pct = p => (p * 100).toFixed(0) + "%";
+
+function countdown(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return s + "s left";
+  if (s < 3600) return Math.floor(s / 60) + "m left";
+  if (s < 86400) return Math.floor(s / 3600) + "h left";
+  return Math.floor(s / 86400) + "d left";
+}
+
+function drawBoard() {
+  const el = $("#board");
+  if (!markets.length) {
+    el.innerHTML = '<div class="empty">No markets are open right now.<br>' +
+      'They open on a schedule — check back in a minute.</div>';
+    return;
+  }
+  const now = Date.now();
+  el.innerHTML = markets.map((m, i) => {
+    const total = m.outcomes.reduce((a, o) => a + o.pool, 0);
+    const sides = m.outcomes.map((o, j) => {
+      const p = total > 0 ? o.pool / total : 1 / m.outcomes.length;
+      const cls = m.outcomes.length === 2 ? (j === 0 ? "y" : "n") : "";
+      return `<button class="side ${cls}" data-m="${i}" data-o="${j}" ${me ? "" : "disabled"}>
+        <span class="nm">${esc(o.name)}</span><span class="pc">${pct(p)}</span></button>`;
+    }).join("");
+    return `<div class="card">
+      <p class="q">${esc(m.question)}</p>
+      <p class="meta">${money(total)} ${esc(m.asset)} in play · ${countdown(m.closes_at_ms - now)}</p>
+      <div class="sides">${sides}</div></div>`;
+  }).join("");
+  el.querySelectorAll("button.side").forEach(b =>
+    b.onclick = () => openSheet(markets[+b.dataset.m], +b.dataset.o));
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function drawMine() {
+  const el = $("#mine");
+  if (!me) { el.innerHTML = '<div class="empty">Create a key first.</div>'; return; }
+  const { data } = await call("GET", "/v1/account", undefined, true);
+  const ps = data.positions || [];
+  if (!ps.length) {
+    el.innerHTML = '<div class="empty">No bets yet.<br>Pick a side on the Markets tab.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="card">' + ps.map(p => {
+    const staked = p.total_staked || 0;
+    // Which side this account actually backed, for the line under the question.
+    const backed = (p.outcomes || []).filter(o => o.my_stake > 0).map(o => o.name).join(" + ");
+    const settled = p.status === "Resolved" || p.status === "Voided";
+    let right, note;
+    if (settled && p.settled_value != null) {
+      const net = p.settled_value - staked;
+      right = `<span class="${net >= 0 ? "ok" : ""}">${net >= 0 ? "+" : ""}${money(net)}</span>`;
+      note = p.status === "Voided" ? "voided — stake returned back in full"
+           : (net > 0 ? "won on " + esc(backed) : "lost on " + esc(backed));
+    } else {
+      right = money(staked);
+      note = (settled ? "settling" : "open") + (backed ? " · " + esc(backed) : "");
+    }
+    return `<div class="pos"><div class="l"><div class="t">${esc(p.question)}</div>
+      <div class="s">${note}</div></div><div class="r">${right}</div></div>`;
+  }).join("") + "</div>";
+}
+
+// ---- the bet sheet -------------------------------------------------------------------------
+function openSheet(m, outcome) {
+  sheet = { m, outcome };
+  $("#sq").textContent = m.question;
+  $("#ss").textContent = "Backing " + m.outcomes[outcome].name;
+  $("#asset").textContent = m.asset;
+  $("#chips").innerHTML = [10, 25, 50, 100].map(v =>
+    `<button class="chip" data-v="${v}">${v}</button>`).join("");
+  $("#chips").querySelectorAll(".chip").forEach(c =>
+    c.onclick = () => { $("#amount").value = c.dataset.v; refreshQuote(); });
+  $("#place").disabled = false;
+  $("#place").textContent = "Place bet";
+  $("#scrim").classList.add("on");
+  refreshQuote();
+}
+
+function closeSheet() { $("#scrim").classList.remove("on"); sheet = null; }
+
+async function refreshQuote() {
+  if (!sheet) return;
+  const amt = parseFloat($("#amount").value);
+  if (!(amt > 0)) { $("#rows").innerHTML = ""; return; }
+  const q = (await call("GET",
+    `/v1/markets/${sheet.m.market_id}/quote?outcome=${sheet.outcome}&amount=${amt}`)).data;
+  if (!q || q.payout_if_right == null) return;
+
+  // The two numbers a person actually needs: what they get back, and what they need to be right
+  // about. Everything else is decoration.
+  const be = q.breakeven_probability, mkt = q.implied_probability_before;
+  $("#rows").innerHTML = `
+    <div class="row hi"><span>If you're right, you get</span><b>${money(q.payout_if_right)} ${esc(sheet.m.asset)}</b></div>
+    <div class="row"><span>Profit</span><b>+${money(q.profit_if_right)}</b></div>
+    <div class="row"><span>If you're wrong</span><b>−${money(amt)}</b></div>
+    <div class="row"><span>Everyone else says</span><b>${(mkt * 100).toFixed(0)}% likely</b></div>
+    <div class="row"><span>You need to be right more than</span><b>${(be * 100).toFixed(0)}% of the time</b></div>`;
+
+  // The gap between those last two rows is the whole decision, and it is not obvious to someone
+  // who has never used a pool before. Betting more into a thin pool widens it — you end up
+  // setting the odds you are paid at — so when it gets wide, say so and say what shrinks it.
+  const notes = (q.warnings || []).slice();
+  if (be - mkt > 0.10) {
+    notes.push(
+      `At ${money(amt)} you'd need to be a lot more confident than everyone else (${(be * 100).toFixed(0)}% ` +
+      `against their ${(mkt * 100).toFixed(0)}%), because your bet is big next to the money already in. ` +
+      `A smaller amount narrows that gap.`);
+  }
+  $("#warns").innerHTML = notes.map(w => `<div class="warn">${esc(w)}</div>`).join("");
+}
+
+async function placeBet() {
+  if (!sheet) return;
+  const amt = parseFloat($("#amount").value);
+  const btn = $("#place");
+  btn.disabled = true; btn.textContent = "Placing…";
+
+  // Rehearse first. Catches a closed market or a short balance before it costs anything, and
+  // turns a confusing failure into a sentence.
+  const dry = await call("POST", `/v1/markets/${sheet.m.market_id}/stakes`,
+    { outcome: sheet.outcome, amount: amt, dry_run: true }, true);
+  if (dry.status !== 200) {
+    $("#warns").innerHTML = `<div class="warn">${esc(dry.data.message || "That didn't work.")}</div>`;
+    btn.disabled = false; btn.textContent = "Place bet";
+    return;
+  }
+
+  const res = await call("POST", `/v1/markets/${sheet.m.market_id}/stakes`,
+    { outcome: sheet.outcome, amount: amt }, true);
+  if (res.status !== 200) {
+    $("#warns").innerHTML = `<div class="warn">${esc(res.data.message || "That didn't work.")}</div>`;
+    btn.disabled = false; btn.textContent = "Place bet";
+    return;
+  }
+  btn.textContent = "Bet placed ✓";
+  setBalance(res.data.balance_remaining);
+  setTimeout(() => { closeSheet(); refresh(); drawRecord(); }, 700);
+}
+
+// ---- identity ------------------------------------------------------------------------------
+// Read the balance back rather than trusting a field to be in every response. Three different
+// endpoints return three different shapes, and a balance that silently stops updating is a UI
+// that lies about money.
+async function syncBalance() {
+  if (!me) return;
+  const { status, data } = await call("GET", "/v1/account", undefined, true);
+  if (status !== 200) return;
+  const pts = (data.balances || []).find(b => b.asset === "PTS");
+  if (pts) setBalance(pts.balance);
+}
+
+// A readable name derived from the account id, so the page can address someone as "Amber Kite"
+// rather than agent_A5DDA451D5A852D6. Purely cosmetic and purely local: the id is still what
+// signs, and the venue never learns this name. It exists because a string of hex is not a person,
+// and a page that calls you one is a page you do not come back to.
+const ADJ = ["Amber","Bold","Clever","Quiet","Swift","Iron","Golden","Keen","Lucky","Steady",
+             "Bright","Sharp","Calm","Brave","Nimble","Patient"];
+const NOUN = ["Kite","Falcon","Compass","Anchor","Lantern","Harbour","Signal","Ledger","Beacon",
+              "Marker","Current","Summit","Delta","Vector","Pilot","Quarry"];
+function handleFor(id) {
+  let h = 0;
+  for (const c of String(id)) h = (h * 33 + c.charCodeAt(0)) >>> 0;
+  // `>>>`, not `>>`. JavaScript's signed shift turns any hash at or above 2^31 negative, and a
+  // negative index reads off the end of the array — which is how a perfectly good account got
+  // greeted as "Keen undefined".
+  return ADJ[h % ADJ.length] + " " + NOUN[(h >>> 8) % NOUN.length];
+}
+
+// How they are actually doing. Not decoration: someone who cannot see whether they are any good
+// at this has no reason to come back, and someone who can has every reason to.
+async function drawRecord() {
+  if (!me) return;
+  const { status, data } = await call("GET", "/v1/account/record", undefined, true);
+  const el = $("#record");
+  if (status !== 200 || !data.scored_markets) { el.hidden = true; return; }
+  const hit = data.hit_rate == null ? "\u2014" : Math.round(data.hit_rate * 100) + "%";
+  const beats = data.beats_a_coin_flip;
+  el.hidden = false;
+  el.innerHTML =
+    "<span><b>" + data.scored_markets + "</b> settled</span>" +
+    "<span><b>" + hit + "</b> called right</span>" +
+    (beats === true ? "<span class=\"ok\">better than a coin flip</span>"
+     : beats === false ? "<span>not beating a coin flip yet</span>" : "");
+}
+
+function setBalance(v) {
+  const b = $("#bal");
+  b.hidden = false;
+  b.textContent = money(v) + " PTS";
+}
+
+async function register() {
+  const btn = $("#go");
+  btn.disabled = true; btn.textContent = "Creating…";
+  try {
+    const id = await newIdentity();
+    priv = id.priv;
+    const r = await call("POST", "/v1/agents", { pubkey_hex: id.pubkey_hex }, true);
+    if (r.status !== 200 && r.status !== 201) {
+      $("#startnote").textContent = r.data.message || "Registration failed. Try again in a moment.";
+      btn.disabled = false; btn.textContent = "Create my key";
+      return;
+    }
+    me = { agent_id: r.data.agent_id };
+    localStorage.setItem(KEY, JSON.stringify({ agent_id: me.agent_id, key: id.seedHex, kind: id.kind }));
+    $("#start").hidden = true;
+    setBalance(r.data.starting_points);
+    $("#sub").textContent = "You're " + handleFor(me.agent_id) + ". Pick a side.";
+    // A brand-new account has no record to draw yet; refresh() is what fills the board.
+    refresh();
+  } catch (e) {
+    $("#unsupported").hidden = false;
+    $("#unsupportedwhy").textContent = e.message +
+      " — if this keeps happening, tell whoever runs this venue.";
+    btn.disabled = false; btn.textContent = "Create my key";
+  }
+}
+
+async function restore() {
+  const saved = localStorage.getItem(KEY);
+  if (!saved) return false;
+  try {
+    const s = JSON.parse(saved);
+    priv = await loadPriv(s.key || s.pkcs8, s.kind || "pkcs8");
+    me = { agent_id: s.agent_id };
+    const { status, data } = await call("GET", "/v1/account", undefined, true);
+    if (status !== 200) { localStorage.removeItem(KEY); me = null; priv = null; return false; }
+    const pts = (data.balances || []).find(b => b.asset === "PTS");
+    setBalance(pts ? pts.balance : 0);
+    $("#sub").textContent = "Welcome back, " + handleFor(me.agent_id) + ".";
+    drawRecord();
+    return true;
+  } catch (e) { return false; }
+}
+
+// ---- boot ----------------------------------------------------------------------------------
+async function refresh() {
+  const { data } = await call("GET", "/v1/markets?limit=40");
+  markets = (data.markets || []).filter(m => m.status === "Open");
+  drawBoard();
+  if (!$("#mine").hidden) drawMine();
+  if (!$("#chal").hidden) drawChallenges();
+}
+
+async function boot() {
+  // If the venue cannot be reached, say so. A blank board with no explanation reads as "this is
+  // broken and always was", which is the impression that ends a visit.
+  try {
+    const ping = await fetch("/health");
+    if (!ping.ok) throw new Error("status " + ping.status);
+  } catch (e) {
+    document.querySelector(".wrap").insertAdjacentHTML("afterbegin",
+      '<div class="card" style="border-color:var(--no);background:var(--no-soft)">' +
+      '<p style="margin:0;font-weight:600;color:var(--no)">Can\'t reach the venue</p>' +
+      '<p style="margin:6px 0 0;color:var(--no);font-size:14.5px">The server behind this page ' +
+      'isn\'t answering. Nothing you do here will save. Try again in a moment.</p></div>');
+    return;
+  }
+
+  // One round trip that also measures the clock. Half the round-trip time is subtracted so a slow
+  // connection is not mistaken for a wrong clock.
+  const t0 = Date.now();
+  const spec = (await call("GET", "/v1/spec")).data;
+  const rtt = Date.now() - t0;
+  if (spec.server_time_ms) {
+    clockOffsetMs = spec.server_time_ms - (t0 + rtt / 2);
+    if (Math.abs(clockOffsetMs) > 120000) {
+      $("#startnote").textContent =
+        "Heads up: this device's clock is " + Math.round(Math.abs(clockOffsetMs) / 1000) +
+        "s out. Using the venue's time instead so your bets aren't rejected.";
+    }
+  }
+  $("#foot").textContent = spec.cost || "";
+
+  // Say it plainly rather than letting the padlock's absence do the talking. The page works
+  // without HTTPS on purpose — a venue that will not run until someone owns a domain never runs
+  // at all — but "works" and "safe on a hostile network" are different claims and only one of
+  // them is true here.
+  if (!window.isSecureContext) $("#insecure").hidden = false;
+
+  if (!(await restore())) $("#start").hidden = false;
+
+  $("#tabs").hidden = false;
+  await refresh();
+  setInterval(refresh, 15000);
+}
+
+// ---- head to head: anyone can post a bet, anyone can take the other side --------------------
+//
+// The pool markets are made by the venue. This is the half where the *participants* make them:
+// a person or a bot writes a question, puts money behind one side, and it goes live the instant
+// anybody funds the other. It is the same object either way — no separate "human" and "bot"
+// markets, so a person can take a bot's bet and a bot can take a person's.
+let chalSide = 0;
+
+async function drawChallenges() {
+  const el = $("#chal");
+  const { data } = await call("GET", "/v1/challenges?limit=40");
+  // The API says "open" in lower case. Comparing against "Open" matched nothing, so the list
+  // stayed empty while offers really existed — the worst kind of bug, because both halves looked
+  // like they worked.
+  const open = (data.challenges || []).filter(c => String(c.status).toLowerCase() === "open");
+  const head =
+    `<button class="cta" id="opennew" style="margin-bottom:14px">Bet on anything →</button>`;
+  if (!open.length) {
+    el.innerHTML = head + '<div class="empty">Nobody is offering a bet right now.<br>' +
+      'Post one and see who takes it.</div>';
+    $("#opennew").onclick = openComposer;
+    return;
+  }
+  const now = Date.now();
+  // The listing names the two sides but never who posted the offer — that stays private, the
+  // same as every other position here. So the page cannot mark one "yours"; taking your own is
+  // refused by the server and the refusal is shown on the button.
+  el.innerHTML = head + open.map(c => {
+    const theirs = c.proposer_side || {};
+    const yours = c.open_side || {};
+    const win = (c.pot || 0) - (yours.stake_required || 0);
+    return `<div class="card chal">
+      <p class="q">${esc(c.question)}</p>
+      <p class="meta">They're on ${esc(theirs.name || "the other side")} for
+        ${money(theirs.stake || 0)} · ${countdown(c.closes_at_ms - now)}</p>
+      <div class="odds">
+        <span>You'd back <b>${esc(yours.name || "?")}</b></span>
+        <span>Risk <b>${money(yours.stake_required || 0)}</b></span>
+        <span>Win <b>${money(win)}</b></span>
+      </div>
+      <button class="cta" data-c="${esc(c.challenge_id)}">Take the other side</button>
+      <button class="ghost" data-w="${esc(c.challenge_id)}"
+              style="width:100%;margin-top:6px;font-size:13px;border:0;color:var(--faint)">
+        Posted this one? Take it back</button>
+    </div>`;
+  }).join("");
+  $("#opennew").onclick = openComposer;
+  el.querySelectorAll("[data-c]").forEach(b => b.onclick = () => takeChallenge(b, b.dataset.c));
+  el.querySelectorAll("[data-w]").forEach(b => b.onclick = () => withdrawChallenge(b, b.dataset.w));
+}
+
+async function takeChallenge(btn, id) {
+  if (!me) return;
+  btn.disabled = true; btn.textContent = "Taking…";
+  const { status, data } = await call("POST", `/v1/challenges/${id}/accept`, {}, true);
+  if (status === 200 || status === 201) {
+    btn.textContent = "Taken ✓";
+    await syncBalance();
+    setTimeout(() => { drawChallenges(); refresh(); }, 700);
+  } else {
+    btn.disabled = false;
+    btn.textContent = data.message ? data.message.slice(0, 60) : "Couldn't take it";
+  }
+}
+
+async function withdrawChallenge(btn, id) {
+  btn.disabled = true; btn.textContent = "Withdrawing…";
+  const { status, data } = await call("POST", `/v1/challenges/${id}/withdraw`, {}, true);
+  if (status === 200 || status === 201) {
+    await syncBalance();
+    setTimeout(drawChallenges, 500);
+  } else {
+    btn.disabled = false;
+    btn.textContent = data.message ? data.message.slice(0, 60) : "Couldn't withdraw";
+  }
+}
+
+function openComposer() {
+  if (!me) { $("#start").hidden = false; $("#start").scrollIntoView(); return; }
+  chalSide = 0;
+  $("#cyes").classList.add("picked"); $("#cno").classList.remove("picked");
+  $("#cwarn").innerHTML = "";
+  $("#cgo").disabled = false; $("#cgo").textContent = "Post it";
+  $("#newchal").classList.add("on");
+}
+
+$("#cyes").onclick = () => { chalSide = 0; $("#cyes").classList.add("picked"); $("#cno").classList.remove("picked"); };
+$("#cno").onclick = () => { chalSide = 1; $("#cno").classList.add("picked"); $("#cyes").classList.remove("picked"); };
+$("#ccancel").onclick = () => $("#newchal").classList.remove("on");
+$("#newchal").onclick = e => { if (e.target === $("#newchal")) $("#newchal").classList.remove("on"); };
+
+$("#cgo").onclick = async () => {
+  const q = $("#cq").value.trim();
+  const how = $("#ch").value.trim();
+  const mineAmt = parseFloat($("#cmine").value);
+  const theirs = parseFloat($("#ctheirs").value);
+  const warn = m => { $("#cwarn").innerHTML = `<div class="warn">${esc(m)}</div>`; };
+
+  if (q.length < 8) return warn("Write the question out properly — whoever takes it has to be able to settle it.");
+  if (how.length < 8) return warn("Say how it gets settled. A bet nobody can settle is an argument.");
+  if (!(mineAmt > 0) || !(theirs > 0)) return warn("Both stakes have to be more than zero.");
+
+  const closes = Date.now() + clockOffsetMs + parseInt($("#cwhen").value, 10);
+  const btn = $("#cgo");
+  btn.disabled = true; btn.textContent = "Posting…";
+  const { status, data } = await call("POST", "/v1/challenges", {
+    question: q,
+    my_outcome: chalSide,
+    my_stake: mineAmt,
+    their_stake: theirs,
+    closes_at_ms: closes,
+    observed_at_ms: closes + 60000,
+    // Settled by the two of you agreeing afterwards. Neither side can decide alone, and if you
+    // disagree — or the other side goes quiet — it voids and everyone gets their stake back.
+    resolution: { kind: "mutual_agreement", criteria: how },
+  }, true);
+  if (status === 200 || status === 201) {
+    await syncBalance();
+    $("#newchal").classList.remove("on");
+    $("#cq").value = ""; $("#ch").value = "";
+    drawChallenges();
+  } else {
+    btn.disabled = false; btn.textContent = "Post it";
+    warn(data.message || "That didn't work.");
+  }
+};
+
+// ---- key backup and restore ------------------------------------------------------------------
+// The account IS the key. Without a way to copy it out, a cleared cache is a destroyed account and
+// a destroyed forecasting record, silently, with no warning and no recovery. That is a bad enough
+// outcome that it deserves a visible door rather than a sentence in the footer.
+function backupBlob() {
+  const saved = localStorage.getItem(KEY);
+  if (!saved) return "";
+  const s = JSON.parse(saved);
+  return "ikenga-key-v1:" + (s.kind || "pkcs8") + ":" + s.agent_id + ":" + (s.key || s.pkcs8);
+}
+
+$("#showbackup").onclick = e => {
+  e.preventDefault();
+  const blob = backupBlob();
+  if (blob) {
+    $("#backup").value = blob;
+    $("#backupcard").hidden = false;
+    $("#backupcard").scrollIntoView({ behavior: "smooth", block: "center" });
+  } else {
+    $("#restorecard").hidden = false;
+    $("#restorecard").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+};
+$("#hidekey").onclick = () => { $("#backupcard").hidden = true; };
+$("#copykey").onclick = () => {
+  const b = $("#backup");
+  b.select();
+  navigator.clipboard.writeText(b.value).catch(() => document.execCommand("copy"));
+  $("#copykey").textContent = "Copied";
+  setTimeout(() => $("#copykey").textContent = "Copy my key", 1500);
+};
+
+$("#dorestore").onclick = async () => {
+  const err = $("#restoreerr");
+  err.textContent = "";
+  const parts = $("#restorebox").value.trim().split(":");
+  if (parts.length !== 4 || parts[0] !== "ikenga-key-v1") {
+    err.textContent = "That doesn't look like an Ikenga key.";
+    return;
+  }
+  const [, kind, agent_id, key] = parts;
+  try {
+    // Prove the key works against this venue before overwriting whatever is already stored —
+    // pasting a typo should not cost you the account you already had.
+    const prevPriv = priv, prevMe = me;
+    priv = await loadPriv(key, kind);
+    me = { agent_id };
+    const { status } = await call("GET", "/v1/account", undefined, true);
+    if (status !== 200) {
+      priv = prevPriv; me = prevMe;
+      err.textContent = "This venue didn't accept that key. Check you copied all of it.";
+      return;
+    }
+    localStorage.setItem(KEY, JSON.stringify({ agent_id, key, kind }));
+    location.reload();
+  } catch (e) {
+    err.textContent = "Couldn't read that key: " + e.message;
+  }
+};
+
+$("#go").onclick = register;
+$("#haskey").onclick = () => {
+  $("#restorecard").hidden = false;
+  $("#restorecard").scrollIntoView({ behavior: "smooth", block: "center" });
+};
+$("#cancel").onclick = closeSheet;
+$("#place").onclick = placeBet;
+$("#scrim").onclick = e => { if (e.target === $("#scrim")) closeSheet(); };
+$("#amount").oninput = () => { clearTimeout(quoteTimer); quoteTimer = setTimeout(refreshQuote, 250); };
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === t));
+  const which = t.dataset.t;
+  $("#board").hidden = which !== "board";
+  $("#chal").hidden = which !== "chal";
+  $("#mine").hidden = which !== "mine";
+  if (which === "mine") drawMine();
+  if (which === "chal") drawChallenges();
+});
+boot();
+</script>
+</body>
+</html>

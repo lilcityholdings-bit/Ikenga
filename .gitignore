@@ -1,0 +1,7 @@
+/target
+**/target/
+/data
+**/data/
+*.wal
+__pycache__/
+*.pyc
