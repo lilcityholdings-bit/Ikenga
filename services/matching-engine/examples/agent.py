@@ -52,7 +52,10 @@ try:
     def sign(seed_hex, message: bytes) -> str:
         return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex)).sign(message).hex()
 
-except ImportError:
+except BaseException:
+    # Not just ImportError: a broken/mismatched native extension for `cryptography` raises a
+    # pyo3_runtime.PanicException at import time, which is a BaseException, not an Exception —
+    # `except ImportError` and even `except Exception` both miss it.
     PKCS8 = bytes.fromhex("302e020100300506032b657004220420")
 
     def new_key():

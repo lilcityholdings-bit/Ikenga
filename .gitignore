@@ -5,3 +5,5 @@
 *.wal
 __pycache__/
 *.pyc
+*-agent.json
+ikenga-agent.json
