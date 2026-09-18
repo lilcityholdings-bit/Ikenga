@@ -32,10 +32,9 @@ Implemented and running today:
   at the top of `Cargo.toml`. Ed25519 is the one exception to "hand-rolled": that's real,
   audited crypto via a subprocess, not a from-scratch elliptic-curve implementation, at a real
   measured latency cost — see `docs/PERFORMANCE.md`.
-- `sdk/ts` — TypeScript agent SDK, zero npm dependencies (Node's built-in `fetch`/`WebSocket`/
-  `crypto`, including for signing — Node has real Ed25519 support built in): signs requests with
-  an agent's own private key, submits/cancels orders, decodes the binary WS tick frames and emits
-  a `"gap"` event when it detects a missed sequence number.
+- `examples/agent.py` and `bots/market-maker/market_maker.py` — reference clients with no
+  dependencies beyond a stdlib Python and `openssl` on `PATH`. A TypeScript SDK is planned
+  (see `docs/ROADMAP.md`) but doesn't exist in this repo yet — don't reference `sdk/ts`.
 - Owner-only routes (`GET /v1/treasury`, `POST /dev/faucet/...`, `POST /v1/compliance/resolve`,
   `GET /v1/compliance/disclosures`) gated behind a generated `X-Owner-Key` — one shared secret,
   not the spec's real admin/role system.
@@ -129,8 +128,10 @@ python3 route_test.py        # non-custodial routing: pricing, refusals, trial a
 python3 crash_test.py        # kill -9 a live server, prove nothing was lost
 ```
 
-There's also a TypeScript SDK demo doing the same thing through `sdk/ts` — see
-`sdk/ts/README.md`.
+There's also `bots/market-maker/market_maker.py` — a reference market maker that posts real
+two-sided liquidity with real risk controls (position cap, inventory skew, loss limit, halt on a
+reference-price jump, cancel-all on shutdown). See `bots/market-maker/README.md` for what it is
+and, more importantly, what it isn't.
 
 ## Docs
 
@@ -143,8 +144,9 @@ There's also a TypeScript SDK demo doing the same thing through `sdk/ts` — see
 - `docs/ARCHITECTURE.md` — full technical spec, cleaned up, with corrections noted inline.
 - `bots/market-maker/` — reference market maker: posts real two-sided liquidity so the book is
   never empty. Read its README on why faking volume is both blocked and pointless here.
-- `docs/PERFORMANCE.md` — measured throughput/latency (32.5k orders/sec, p99 0.55ms on a 2-core
-  box), what was slow and why, and the caveats that make those numbers honest.
+- `docs/PERFORMANCE.md` — measured throughput/latency (in-process matching: 0.66-3.67µs/op; the
+  real ceiling is Ed25519 verification via `openssl` subprocess at ~4,823/sec), what actually
+  gates each path, and why an earlier "32.5k orders/sec" claim didn't hold up.
 - `docs/ROADMAP.md` — phased build order from this core slice to the full vision.
 - `docs/COMPLIANCE-NOTES.md` — the regulatory gating items (fiat, custody, prediction markets)
   that need legal sign-off before any real money flows, referenced once here rather than repeated
