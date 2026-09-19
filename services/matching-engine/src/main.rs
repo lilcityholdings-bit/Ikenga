@@ -131,11 +131,7 @@ fn main() {
         println!("value: promotional points only (no redeemable assets, no withdrawals)");
     }
 
-    let bind = std::env::var("IKENGA_BIND").unwrap_or_else(|_| {
-        // PORT is what almost every hosting platform injects.
-        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-        format!("0.0.0.0:{port}")
-    });
+    let bind = resolve_bind();
     let listener = match TcpListener::bind(&bind) {
         Ok(l) => l,
         Err(e) => {
@@ -734,9 +730,26 @@ fn install_liquidity_sources(state: &mut AppState, production: bool) {
     }
 }
 
+/// The address this server listens on. Factored out so startup and `--healthcheck` can't drift
+/// apart — they used to: `--healthcheck` ignored `IKENGA_BIND` entirely and only ever checked
+/// the `PORT`-env default, so a deployment that set `IKENGA_BIND` to a non-default port (a real
+/// thing to do behind a reverse proxy) looked permanently unhealthy to a container orchestrator
+/// despite serving every request correctly.
+fn resolve_bind() -> String {
+    std::env::var("IKENGA_BIND").unwrap_or_else(|_| {
+        // PORT is what almost every hosting platform injects.
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+        format!("0.0.0.0:{port}")
+    })
+}
+
 fn run_healthcheck() -> i32 {
     use std::io::{Read, Write};
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    // Always dial loopback rather than whatever host `bind` names: the default (and the only
+    // sane thing to bind in a container) is 0.0.0.0, which is reachable via 127.0.0.1 from
+    // inside the same container — only the port half of `bind` actually matters here.
+    let bind = resolve_bind();
+    let port = bind.rsplit(':').next().unwrap_or("8080");
     let addr = format!("127.0.0.1:{port}");
 
     let result = (|| -> std::io::Result<bool> {

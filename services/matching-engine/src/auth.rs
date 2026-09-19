@@ -44,13 +44,28 @@ pub struct NonceCache {
 }
 
 impl NonceCache {
+    /// Above this many tracked nonces, a sweep runs before inserting a new one. Same threshold
+    /// and reasoning as `trust::RateLimiter::SWEEP_THRESHOLD` — every signed request passes
+    /// through here, so a `retain` on *every call* (the previous version of this function) is an
+    /// O(n) scan under one global lock on the single hottest path in the server. At any sustained
+    /// signed-request rate, the cache never actually shrinks between requests, so n grows without
+    /// bound and the per-request cost grows with it: this is the shape of a server that looks
+    /// fine in every test (small n) and falls over under real load (large n) in exactly the
+    /// place — auth, needed by everything — where a slowdown is most visible.
+    const SWEEP_THRESHOLD: usize = 10_000;
+
     /// Returns true if this (agent, nonce) pair has not been seen before and records it.
     /// Returns false if it's a replay.
     pub fn check_and_record(&self, agent_id: &str, nonce: &str, now_ms: i64) -> bool {
         let mut seen = self.seen.lock().unwrap();
-        seen.retain(|_, expiry| *expiry > now_ms); // opportunistic cleanup
 
         let key = format!("{agent_id}:{nonce}");
+        // Sweep only past the threshold, and only when this key isn't already a hit — matches
+        // RateLimiter's pattern, so an attacker can't force a sweep on every call just by using a
+        // fresh nonce (which every legitimate caller also does).
+        if seen.len() > Self::SWEEP_THRESHOLD && !seen.contains_key(&key) {
+            seen.retain(|_, expiry| *expiry > now_ms);
+        }
         if seen.contains_key(&key) {
             return false;
         }
@@ -484,7 +499,14 @@ impl IdempotencyCache {
             return;
         }
         let mut seen = self.seen.lock().unwrap();
-        seen.retain(|_, (expiry, _, _)| *expiry > now_ms);
+        // Only pay for a full scan when actually at capacity, not on every call — `put` runs on
+        // every authenticated write request (main.rs), so an unconditional retain() here is the
+        // same O(n)-under-a-global-lock issue as NonceCache::check_and_record had. Most calls
+        // that would have swept find nothing worth removing anyway; the ones that matter (an
+        // actually-full cache) are exactly the ones this still handles.
+        if seen.len() >= MAX_IDEMPOTENT_ENTRIES {
+            seen.retain(|_, (expiry, _, _)| *expiry > now_ms);
+        }
         if seen.len() >= MAX_IDEMPOTENT_ENTRIES {
             return;
         }
@@ -554,6 +576,75 @@ mod idempotency_tests {
         assert!(
             cache.seen.lock().unwrap().len() <= MAX_IDEMPOTENT_ENTRIES,
             "the cache must not grow without bound"
+        );
+    }
+
+    #[test]
+    fn idempotent_answers_still_expire_once_the_cache_fills_up() {
+        // Regression test for the same fix as NonceCache: retain() now only runs once the cache
+        // is at capacity, not on every put(). Prove that still reclaims expired entries rather
+        // than permanently wedging the cache full of stale answers once MAX_IDEMPOTENT_ENTRIES
+        // is hit.
+        let cache = IdempotencyCache::default();
+        let now = 1_800_000_000_000;
+        for i in 0..MAX_IDEMPOTENT_ENTRIES {
+            cache.put("a", &format!("n{i}"), "sig", 200, b"ok", now);
+        }
+        assert_eq!(cache.seen.lock().unwrap().len(), MAX_IDEMPOTENT_ENTRIES);
+
+        let later = now + NONCE_TTL_MS + 1;
+        cache.put("a", "fresh-after-expiry", "sig", 200, b"ok", later);
+        assert!(
+            cache.get("a", "fresh-after-expiry", "sig", later).is_some(),
+            "a new answer must still fit once the old, expired ones are swept out at capacity"
+        );
+    }
+
+    #[test]
+    fn nonce_cache_still_rejects_a_replay_after_the_sweep_threshold() {
+        // Regression test: check_and_record used to run an unconditional O(n) retain() on every
+        // call, which is a full scan under a single global lock on the hottest path in the
+        // server. Fixed to sweep only past NonceCache::SWEEP_THRESHOLD, matching
+        // trust::RateLimiter's own pattern. This proves the fix didn't also break correctness.
+        let cache = NonceCache::default();
+        let now = 1_800_000_000_000;
+
+        for i in 0..(NonceCache::SWEEP_THRESHOLD + 500) {
+            assert!(cache.check_and_record("agent", &format!("n{i}"), now));
+        }
+
+        assert!(
+            !cache.check_and_record("agent", "n0", now),
+            "a nonce used before crossing the sweep threshold must still be rejected as a replay"
+        );
+        assert!(
+            cache.check_and_record("agent", "brand-new-nonce", now),
+            "a genuinely fresh nonce must still be accepted once the cache is large"
+        );
+    }
+
+    #[test]
+    fn nonce_cache_eventually_sheds_expired_entries() {
+        let cache = NonceCache::default();
+        let now = 1_800_000_000_000;
+
+        for i in 0..(NonceCache::SWEEP_THRESHOLD + 500) {
+            cache.check_and_record("agent", &format!("n{i}"), now);
+        }
+        let before = cache.seen.lock().unwrap().len();
+
+        // Past every nonce's TTL, and past the sweep threshold again with fresh nonces: the next
+        // few calls should trigger a sweep and shrink the map back down, not grow it forever.
+        let later = now + NONCE_TTL_MS + 1;
+        for i in 0..600 {
+            cache.check_and_record("agent", &format!("late{i}"), later);
+        }
+        let after = cache.seen.lock().unwrap().len();
+
+        assert!(
+            after < before,
+            "expired entries should eventually be swept, not retained forever \
+             (before={before}, after={after})"
         );
     }
 }
