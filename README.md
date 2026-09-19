@@ -151,3 +151,6 @@ and, more importantly, what it isn't.
 - `docs/COMPLIANCE-NOTES.md` — the regulatory gating items (fiat, custody, prediction markets)
   that need legal sign-off before any real money flows, referenced once here rather than repeated
   throughout the code.
+- `DEPLOY.md` — the Dockerfile and `docker-compose.yml`, both actually built and run this round
+  (not just written): what env vars matter, what production mode requires, and two real bugs that
+  only surfaced from running the deploy path rather than reading the code.

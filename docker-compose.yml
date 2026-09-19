@@ -1,0 +1,27 @@
+services:
+  matching-engine:
+    build: ./services/matching-engine
+    ports:
+      - "8080:8080"
+    volumes:
+      # This is what makes the container restartable without losing balances/orders — see
+      # src/wal.rs and docs/CUSTODY.md. Without it the WAL still writes inside the container's
+      # writable layer, which is fine until the container is removed (not just restarted).
+      - ikenga-data:/app/data
+    environment:
+      # Uncomment for a real deployment — see the FATAL checks in main.rs for why both are
+      # required together in production: no WAL means balances vanish on restart, and no pinned
+      # owner key means the key guarding /v1/treasury and the dev faucet changes every restart.
+      # - IKENGA_ENV=production
+      # - IKENGA_OWNER_KEY=<generate with: openssl rand -hex 32>
+      IKENGA_WAL_SYNC: always
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/ikenga-matching-engine", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  ikenga-data:

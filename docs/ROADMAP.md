@@ -23,10 +23,17 @@ reason this file — and getting this whole project into one durable git history
   loss limit, halt-on-price-jump, cancel-all-on-shutdown), verified live against a running
   server this round.
 - Self-service onboarding: `POST /v1/agents`, unauthenticated reads of the board/spec/fees.
+- A real Dockerfile and `docker-compose.yml` (`DEPLOY.md`) — `README.md` referenced "this
+  project's Dockerfile" for a long time without one existing. Built, and verified this round:
+  clean build, `docker ps` reports the container healthy, and a real `docker restart` recovered a
+  funded agent's balance exactly via the WAL. Also found and fixed two real bugs that only showed
+  up from actually running the deploy path — see `DEPLOY.md`'s "Two bugs" section.
 
 **Still genuinely missing:**
-- A domain, TLS, and an always-on host. Everything above runs; nothing is reachable by anyone
-  outside a machine someone is sitting at. This is the actual remaining blocker, not persistence.
+- A domain, TLS, and an always-on host. The container now runs, restarts cleanly, and reports
+  itself healthy — what's still missing is putting a real domain and a TLS-terminating reverse
+  proxy (Caddy or a Cloudflare Tunnel — see `DEPLOY.md`) in front of it on a host that stays up.
+  That's the actual remaining blocker, not persistence or packaging.
 - `sdk/ts` — referenced in `README.md`, not present in this repo. `examples/agent.py` and
   `bots/market-maker/market_maker.py` are the working Python references in the meantime.
 - Fiat rails, KYC/AML, real-money prediction markets, BTC treasury conversion, a real
