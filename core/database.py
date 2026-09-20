@@ -97,6 +97,14 @@ def get_conn():
         os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(settings.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # The dashboard and worker are two separate long-lived processes
+    # hitting this same file concurrently. WAL lets the dashboard read
+    # while the worker writes instead of blocking on the default
+    # rollback journal, and busy_timeout keeps a write from failing
+    # immediately if it loses a brief race instead of raising
+    # "database is locked".
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
         conn.commit()

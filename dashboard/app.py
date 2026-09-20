@@ -4,7 +4,9 @@ with nothing actually executing it; the health panel below exists to catch
 exactly that.
 """
 
+import hmac
 import json
+import time
 
 import streamlit as st
 
@@ -16,6 +18,9 @@ st.set_page_config(page_title="Money Bots", page_icon="🤖", layout="wide")
 
 db.init_db()
 ensure_bots_seeded()
+
+MAX_LOGIN_ATTEMPTS_BEFORE_COOLDOWN = 3
+COOLDOWN_SECONDS = 30
 
 
 def _check_password():
@@ -29,19 +34,43 @@ def _check_password():
     if st.session_state.get("authed"):
         return
 
+    attempts = st.session_state.get("login_attempts", 0)
+    locked_until = st.session_state.get("login_locked_until", 0)
+    remaining = locked_until - time.monotonic()
+    if remaining > 0:
+        st.error(f"Too many wrong attempts. Try again in {int(remaining) + 1}s.")
+        st.stop()
+
     password = st.text_input("Dashboard password", type="password")
     if password:
-        if password == settings.DASHBOARD_PASSWORD:
+        # Constant-time compare — a plain `==` short-circuits on the first
+        # mismatched byte, which leaks how many leading characters were
+        # right to anyone able to time repeated attempts against a
+        # password gate that's meant to sit on a public URL.
+        if hmac.compare_digest(password, settings.DASHBOARD_PASSWORD):
             st.session_state["authed"] = True
+            st.session_state.pop("login_attempts", None)
+            st.session_state.pop("login_locked_until", None)
             st.rerun()
         else:
+            attempts += 1
+            st.session_state["login_attempts"] = attempts
+            if attempts >= MAX_LOGIN_ATTEMPTS_BEFORE_COOLDOWN:
+                st.session_state["login_locked_until"] = time.monotonic() + COOLDOWN_SECONDS
+                st.session_state["login_attempts"] = 0
             st.error("Wrong password.")
     st.stop()
 
 
 _check_password()
 
-st.title("🤖 Money Bots")
+title_col, logout_col = st.columns([6, 1])
+with title_col:
+    st.title("🤖 Money Bots")
+with logout_col:
+    if st.button("Log out"):
+        st.session_state.pop("authed", None)
+        st.rerun()
 
 # --- Health panel ---
 health = controller.get_health()

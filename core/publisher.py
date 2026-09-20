@@ -11,6 +11,7 @@ import base64
 import requests
 
 from config import settings
+from core import database as db
 from core.security import safe_slug, sanitize_html
 
 API_ROOT = "https://api.github.com"
@@ -119,11 +120,29 @@ def _get_existing_index_items(index_path: str) -> list:
 def _update_index(folder: str, title: str, slug: str):
     index_path = f"{folder}/index.html"
     items = _get_existing_index_items(index_path)
+    # Match on the href, not the whole line: a re-publish under the same
+    # slug with a changed title would otherwise fail the exact-line check
+    # and add a second, stale entry pointing at the same page instead of
+    # replacing the old one.
+    href_marker = f'href="articles/{slug}.html"'
+    items = [line for line in items if href_marker not in line]
     entry = f'  <li><a href="articles/{slug}.html">{_escape(title)}</a></li>\n'
-    if entry not in items:
-        items.insert(0, entry)
+    items.insert(0, entry)
     html = INDEX_HEADER + "".join(items) + INDEX_FOOTER
     _put_file(index_path, html, message=f"Update index: {title}")
+
+
+def _unique_slug(base_slug: str) -> str:
+    """Disambiguate a slug against already-published articles so two
+    different titles that happen to truncate/sanitize to the same slug
+    don't silently overwrite each other's page on the live site."""
+    existing = {a["slug"] for a in db.list_articles()}
+    if base_slug not in existing:
+        return base_slug
+    n = 2
+    while f"{base_slug}-{n}" in existing:
+        n += 1
+    return f"{base_slug}-{n}"
 
 
 def publish_article(bot_name: str, title: str, body_html: str) -> dict:
@@ -133,7 +152,7 @@ def publish_article(bot_name: str, title: str, body_html: str) -> dict:
         )
 
     folder = settings.GITHUB_PAGES_FOLDER.strip("/")
-    slug = safe_slug(title)[:80]
+    slug = _unique_slug(safe_slug(title)[:80])
     clean_body = sanitize_html(body_html)
     article_path = f"{folder}/articles/{slug}.html"
     html = ARTICLE_TEMPLATE.format(title=_escape(title), body=clean_body)

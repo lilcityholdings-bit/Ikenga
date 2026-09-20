@@ -74,15 +74,17 @@ def _openrouter_complete(system, user, json_mode):
 
 
 def _google_complete(system, user, json_mode):
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.GOOGLE_MODEL}:generateContent?key={settings.GOOGLE_API_KEY}"
-    )
+    # The key goes in a header, never the URL: a URL is what ends up in
+    # exception messages, request logs, and any proxy in between, and
+    # those messages get written straight into the activity log the
+    # dashboard displays.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GOOGLE_MODEL}:generateContent"
+    headers = {"x-goog-api-key": settings.GOOGLE_API_KEY}
     prompt = f"{system}\n\n{user}" if system else user
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     if json_mode:
         payload["generationConfig"] = {"response_mime_type": "application/json"}
-    resp = requests.post(url, json=payload, timeout=TIMEOUT)
+    resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]

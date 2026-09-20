@@ -9,6 +9,7 @@ import json
 
 from config import settings
 from core import accounts, content, database as db, publisher, tools
+from core.security import redact_secrets
 
 
 def get_health() -> dict:
@@ -32,10 +33,6 @@ def _configured_secrets() -> list:
 
 
 def _do_publish(bot: dict, decision: dict):
-    if db.count_recent_publishes(bot["id"], window_minutes=60) >= settings.MAX_PUBLISHES_PER_HOUR:
-        db.log_activity(bot["id"], "execution_skipped", "Hourly publish cap reached")
-        return
-
     topic = decision.get("topic") or bot["niche"]
 
     research_notes = []
@@ -66,6 +63,15 @@ def run_cycle(bot: dict):
         )
         return
 
+    # Check the publish cap before spending an LLM call on a decision.
+    # At the default 4-minute loop interval a bot ticks ~15x/hour against
+    # a cap of 4 publishes/hour, so without this a capped bot would still
+    # burn a decision call (and usually get "publish_article" back) on
+    # every tick for the rest of the hour, for nothing.
+    if db.count_recent_publishes(bot["id"], window_minutes=60) >= settings.MAX_PUBLISHES_PER_HOUR:
+        db.log_activity(bot["id"], "execution_skipped", "Hourly publish cap reached")
+        return
+
     recent_activity = db.get_recent_activity(bot_id=bot["id"], limit=10)
     decision = content.decide_action(bot, recent_activity)
     db.log_activity(bot["id"], "decision", json.dumps(decision))
@@ -92,4 +98,9 @@ def run_worker_tick():
             run_cycle(bot)
         except Exception as exc:
             db.record_failure(bot["id"])
-            db.log_activity(bot["id"], "execution_failed", str(exc))
+            # Exception text can carry request details (a failed HTTP call's
+            # URL, a truncated response body); redact before it lands in the
+            # activity log the dashboard displays.
+            db.log_activity(
+                bot["id"], "execution_failed", redact_secrets(str(exc), _configured_secrets())
+            )
