@@ -4,6 +4,32 @@ An autonomous content system: bots research the web, decide what to do,
 and publish real articles to a free GitHub Pages site. You control it from
 a Streamlit dashboard.
 
+## ⚠️ Read this before monetizing on GitHub Pages
+
+**GitHub Pages' own terms prohibit the exact thing this repo is built to
+do.** From GitHub's Pages limits documentation:
+
+> GitHub Pages is not intended for or allowed to be used as a free
+> web-hosting service to run your online business, e-commerce site, or any
+> other website that is primarily directed at either facilitating
+> commercial transactions or providing commercial software as a service
+> (SaaS).
+
+The same policy separately prohibits **"get-rich-quick schemes."**
+
+An affiliate site whose purpose is earning commissions is plausibly "primarily
+directed at facilitating commercial transactions." Running this monetized on
+GitHub Pages risks the site being taken down and potentially the GitHub
+account being actioned — which would also take out the private code repo.
+
+**If you intend to monetize, publish somewhere that permits it.** Netlify,
+Cloudflare Pages, and Vercel all have free tiers that allow affiliate
+content, and all let you attach a domain you own. Buying a real domain
+(~$10/yr) also means the domain authority you build is *yours* rather than
+a subfolder on `github.io` — which matters for the SEO problem below.
+
+Publishing here unmonetized (no affiliate links) is a much smaller concern.
+
 ## Two processes, not one
 
 This is **two separate processes** — running only the web service means
@@ -85,27 +111,58 @@ list to change niches; new entries are seeded on next startup.
 
 ## Will this actually make money?
 
-Be realistic about what code can and can't do here. The mechanical gaps —
-no monetization loop, no real keyword targeting, no on-page SEO, thin
-content going live — are fixed above. What's still true regardless of the
-code:
+**Realistically, on its own: no — or not enough to matter.** The code is
+now mechanically sound, but the remaining blockers are not code problems
+and cannot be fixed by changing this repo.
 
-- **A brand-new site has zero domain authority and no backlinks.** These
-  fixes get it correctly indexed faster; they don't make it rank fast.
-  Expect a slow start even once everything above is working.
-- **Affiliate program approval is not guaranteed**, and most networks
-  reserve the right to reject a site with too little traffic or history.
-- **Free LLM tiers produce serviceable, not exceptional, content.** It
-  won't out-write an established site with real expertise on a
-  competitive topic — this is why long-tail targeting matters.
-- **Nothing here builds backlinks or drives traffic beyond search.** No
-  social posting is automated on purpose — doing that without a human
-  driving it risks violating those platforms' terms and getting accounts
-  banned, so that part stays manual.
+**The arithmetic.** Affiliate revenue is a funnel, and every stage
+multiplies down:
 
-Treat this as a low-risk, mechanically-sound experiment (hosting and LLM
-usage are both free-tier, so the downside is time, not money) rather than
-a guaranteed income source.
+| Stage | Typical rate |
+|---|---|
+| Visitors who click an affiliate link | ~2–5% |
+| Clicks that convert to a sale | ~2–5% |
+| Commission per sale | ~$1–30 |
+
+So roughly **1,000 organic visits/month ≈ 1 sale ≈ $5–20/month.** Earning
+even $500/month needs tens of thousands of monthly visits. At a realistic
+20–50 visits/month for a long-tail article that actually ranks, that's
+*hundreds* of ranking articles — and "ranking" is the hard part, not
+"published."
+
+**Why traffic is the wall:**
+
+- **No backlinks, no authority, no history.** Nothing in this repo creates
+  those. Good on-page SEO makes a site *eligible* to rank; links and
+  reputation are what actually rank it.
+- **Scaled content generation is explicitly targeted by search spam
+  policy.** Mass-produced pages made primarily to rank are penalized
+  regardless of whether a human or an AI wrote them. Volume is a
+  liability here, not an asset — which is why the publish cap defaults low.
+- **Realistic timeline is 6–12+ months** before you could even judge
+  whether it's working, assuming it works at all.
+- **Affiliate approval is not guaranteed.** Most networks reject sites with
+  no traffic. Amazon Associates in particular closes accounts that don't
+  make 3 qualifying sales within 180 days.
+
+**What would actually be required** (mostly not code):
+
+1. A domain you own, on a host that permits monetization (see the warning
+   at the top of this file).
+2. Genuine differentiation — first-hand testing, original data, real
+   expertise — something a reader can't get from the ten existing articles
+   on the same query.
+3. A distribution channel that isn't organic search, built by a human.
+4. Months of consistent effort before any signal.
+
+Steps 2 and 3 are the ones that decide the outcome, and neither is
+automatable — step 3 especially, since automated posting to social
+platforms violates their terms and gets accounts banned.
+
+**Honest framing:** this is a well-built piece of automation and a good
+way to learn the mechanics of content pipelines, SEO plumbing, and
+autonomous agents. It is not a reliable income source, and no further
+change to this codebase would make it one.
 
 ## Other known limitations
 
