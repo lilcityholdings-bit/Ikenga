@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS affiliate_programs (
     bot_id INTEGER,
     name TEXT NOT NULL,
     signup_url TEXT NOT NULL,
+    affiliate_url TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     checklist TEXT,
     created_at TEXT NOT NULL
@@ -115,6 +116,13 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # Migration: affiliate_url was added after affiliate_programs first
+        # shipped. executescript's CREATE TABLE IF NOT EXISTS won't add a
+        # column to a table that already exists, so add it explicitly for
+        # any database created by an earlier version.
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(affiliate_programs)")}
+        if "affiliate_url" not in existing_cols:
+            conn.execute("ALTER TABLE affiliate_programs ADD COLUMN affiliate_url TEXT")
 
 
 # --- bots ---
@@ -292,6 +300,27 @@ def list_affiliate_programs(status: str = None) -> list:
 def update_affiliate_status(program_id: int, status: str):
     with get_conn() as conn:
         conn.execute("UPDATE affiliate_programs SET status=? WHERE id=?", (status, program_id))
+
+
+def set_affiliate_link(program_id: int, affiliate_url: str):
+    """Records the real tracking link a human got after a program approved
+    their signup, and flips the program to active — this is what actually
+    lets generated articles include a working affiliate link."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE affiliate_programs SET affiliate_url=?, status='active' WHERE id=?",
+            (affiliate_url, program_id),
+        )
+
+
+def list_active_affiliate_links(bot_id: int) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT name, affiliate_url FROM affiliate_programs "
+            "WHERE bot_id=? AND status='active' AND affiliate_url IS NOT NULL",
+            (bot_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --- code proposals (approval is symbolic — see Known Limitations) ---

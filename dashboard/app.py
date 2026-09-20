@@ -134,14 +134,19 @@ else:
 
 st.divider()
 
-# --- Affiliate discovery ---
-st.subheader("Affiliate Programs (pending human signup)")
+# --- Affiliate programs ---
+st.subheader("Affiliate Programs")
 st.caption(
     "Discovery is automated and grounded in real search results. Signup stays "
     "a human click — CAPTCHAs, verification, and tax forms need a person, and "
-    "most networks forbid bot-created accounts anyway."
+    "most networks forbid bot-created accounts anyway. Nothing gets monetized "
+    "until you paste in the real tracking link a program gives you after it "
+    "approves you — that's the step that actually turns a program into "
+    "revenue, and only a human can do it."
 )
+
 pending_programs = db.list_affiliate_programs(status="pending")
+st.markdown("**Pending signup**")
 if not pending_programs:
     st.caption("None discovered yet.")
 for program in pending_programs:
@@ -156,6 +161,31 @@ for program in pending_programs:
         if st.button("Mark as submitted", key=f"submit-{program['id']}"):
             db.update_affiliate_status(program["id"], "submitted")
             st.rerun()
+
+submitted_programs = db.list_affiliate_programs(status="submitted")
+st.markdown("**Submitted — waiting on approval**")
+if not submitted_programs:
+    st.caption("None waiting.")
+for program in submitted_programs:
+    with st.expander(program["name"]):
+        st.markdown(f"[Signup link]({program['signup_url']})")
+        st.caption("Once the program approves you, paste the tracking link it gives you below.")
+        link = st.text_input("Your affiliate tracking link", key=f"link-{program['id']}")
+        if st.button("Activate", key=f"activate-{program['id']}", disabled=not link):
+            db.set_affiliate_link(program["id"], link.strip())
+            st.rerun()
+        if st.button("Rejected / not approved", key=f"reject-aff-{program['id']}"):
+            db.update_affiliate_status(program["id"], "rejected")
+            st.rerun()
+
+active_programs = db.list_affiliate_programs(status="active")
+st.markdown("**Active — live in generated articles**")
+if not active_programs:
+    st.caption("None active yet — nothing is monetized until one is.")
+for program in active_programs:
+    bot = db.get_bot(program["bot_id"]) if program["bot_id"] else None
+    bot_label = bot["name"] if bot else "unassigned"
+    st.text(f"✅ {program['name']} ({bot_label}) → {program['affiliate_url']}")
 
 st.divider()
 

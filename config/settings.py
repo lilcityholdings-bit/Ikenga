@@ -30,8 +30,11 @@ DB_PATH = _env("DB_PATH", "data/money_bots.db")
 
 # --- Safety limits ---
 # These only engage when a bot is behaving abnormally; raising them
-# doesn't make a healthy bot faster.
-MAX_PUBLISHES_PER_HOUR = int(_env("MAX_PUBLISHES_PER_HOUR", "4"))
+# doesn't make a healthy bot faster. MAX_PUBLISHES_PER_HOUR defaults low
+# on purpose: search engines' spam systems specifically target high-volume,
+# unedited content from new sites, so a lower steady rate is better for
+# actually getting indexed than a higher one.
+MAX_PUBLISHES_PER_HOUR = int(_env("MAX_PUBLISHES_PER_HOUR", "2"))
 FAILURE_THRESHOLD = int(_env("FAILURE_THRESHOLD", "5"))
 FAILURE_WINDOW_MINUTES = int(_env("FAILURE_WINDOW_MINUTES", "30"))
 HEARTBEAT_STALE_MINUTES = int(_env("HEARTBEAT_STALE_MINUTES", "15"))

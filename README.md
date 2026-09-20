@@ -50,21 +50,65 @@ list to change niches; new entries are seeded on next startup.
 
 - **Published HTML is sanitized** (`core/security.py`) before it ever
   reaches the live site.
-- **SSRF is blocked** — requests to private/loopback/link-local
-  addresses are refused, including the cloud metadata endpoint
-  (`169.254.169.254`).
-- **Secrets are redacted** from generated content before it's stored or
-  published.
+- **SSRF is blocked**, including redirect-based bypasses — requests to
+  private/loopback/link-local addresses are refused (including the cloud
+  metadata endpoint `169.254.169.254`), and redirects are followed
+  manually with the same check re-applied on every hop rather than
+  trusting the first URL alone.
+- **Secrets are redacted** from generated content and from exception text
+  before either reaches logs, bot memory, or the dashboard.
 - **Path traversal is blocked structurally** — every published file path
   is built from a slug of only `[a-z0-9-]`, so generated content can
   never write outside its own article folder.
+- **Thin/malformed articles are never published.** A bad or too-short LLM
+  response fails the cycle instead of shipping a one-sentence stub as a
+  real page — search engines specifically penalize exactly that pattern.
+- **Topics are grounded in real search queries**, not LLM invention
+  (`core/keywords.py`, via DuckDuckGo's free autocomplete) — long-tail,
+  specific queries are the realistic path for a brand-new site with no
+  domain authority to rank for anything at all.
+- **Affiliate links actually reach articles.** Once you mark a program
+  `active` with its real tracking link (dashboard → Affiliate Programs),
+  the content generator can weave it into new articles, and the publisher
+  force-adds `rel="sponsored nofollow noopener"` on any link that points
+  at one of your affiliate URLs regardless of what the LLM produced.
+- **An FTC disclosure is on every article automatically** — not
+  LLM-dependent, added by the publisher itself.
+- **Basic on-page SEO**: meta description, canonical URL, Open Graph
+  tags, and JSON-LD `Article` structured data on every page; a
+  `sitemap.xml` regenerated on every publish; a `robots.txt` pointing at
+  it; a static `about.html` disclosing that content is AI-assisted.
+- **IndexNow** pushes each new URL to Bing/Yandex immediately instead of
+  waiting for organic re-crawl (`core/indexnow.py`). Google doesn't
+  participate in IndexNow — for Google, the sitemap + robots.txt above is
+  what discovery relies on.
 
-## Known limitations
+## Will this actually make money?
 
-- **No revenue yet.** Bots publish genuine articles, but nothing inserts
-  real affiliate links or tracks earnings — that needs your own affiliate
-  account IDs after you manually join a program. Profit reads `$0.00`
-  until then; that's expected.
+Be realistic about what code can and can't do here. The mechanical gaps —
+no monetization loop, no real keyword targeting, no on-page SEO, thin
+content going live — are fixed above. What's still true regardless of the
+code:
+
+- **A brand-new site has zero domain authority and no backlinks.** These
+  fixes get it correctly indexed faster; they don't make it rank fast.
+  Expect a slow start even once everything above is working.
+- **Affiliate program approval is not guaranteed**, and most networks
+  reserve the right to reject a site with too little traffic or history.
+- **Free LLM tiers produce serviceable, not exceptional, content.** It
+  won't out-write an established site with real expertise on a
+  competitive topic — this is why long-tail targeting matters.
+- **Nothing here builds backlinks or drives traffic beyond search.** No
+  social posting is automated on purpose — doing that without a human
+  driving it risks violating those platforms' terms and getting accounts
+  banned, so that part stays manual.
+
+Treat this as a low-risk, mechanically-sound experiment (hosting and LLM
+usage are both free-tier, so the downside is time, not money) rather than
+a guaranteed income source.
+
+## Other known limitations
+
 - **Approved code proposals don't self-apply.** There's no engine that
   rewrites the bot's own files.
 - **"Spending approval" moves no money.** There's no payment integration,
@@ -85,9 +129,12 @@ list to change niches; new entries are seeded on next startup.
 ## Tuning
 
 Everything adjustable lives in `config/settings.py` (as env vars):
-`MAX_PUBLISHES_PER_HOUR` (4), `FAILURE_THRESHOLD` (5),
+`MAX_PUBLISHES_PER_HOUR` (2), `FAILURE_THRESHOLD` (5),
 `FAILURE_WINDOW_MINUTES` (30), `HEARTBEAT_STALE_MINUTES` (15),
-`WORKER_LOOP_INTERVAL_SECONDS` (240). These limits only engage when a bot
+`WORKER_LOOP_INTERVAL_SECONDS` (240). `MAX_PUBLISHES_PER_HOUR` defaults low
+on purpose — search engines' spam systems specifically target high-volume
+unedited content from new sites, so a lower steady rate is better for
+getting indexed than a higher one. The others only engage when a bot
 behaves abnormally — raising them doesn't make a healthy bot faster.
 
 ## Troubleshooting

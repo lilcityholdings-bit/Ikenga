@@ -8,7 +8,7 @@ gates whether that bot runs. Both are required for anything to publish.
 import json
 
 from config import settings
-from core import accounts, content, database as db, publisher, tools
+from core import accounts, content, database as db, indexnow, keywords, publisher, tools
 from core.security import redact_secrets
 
 
@@ -42,14 +42,30 @@ def _do_publish(bot: dict, decision: dict):
         except Exception:
             continue
 
-    article = content.generate_article(bot, topic, research_notes, _configured_secrets())
-    result = publisher.publish_article(bot["name"], article["title"], article["body_html"])
+    active_links = db.list_active_affiliate_links(bot["id"])
+    article = content.generate_article(
+        bot, topic, research_notes, active_links, _configured_secrets()
+    )
+    affiliate_urls = {link["affiliate_url"] for link in active_links}
+    result = publisher.publish_article(
+        bot["name"], article["title"], article["body_html"], affiliate_urls
+    )
 
     db.add_article(bot["id"], article["title"], result["slug"], result["path"], result["url"])
     db.record_publish(bot["id"])
     db.log_activity(
         bot["id"], "published", json.dumps({"title": article["title"], "url": result["url"]})
     )
+
+    if result["url"]:
+        try:
+            indexnow.ensure_key_file_published()
+            indexnow.submit_url(result["url"])
+        except Exception:
+            # The article is already published and logged at this point —
+            # a hiccup pushing the IndexNow key file shouldn't count as a
+            # failed cycle and trip the failure-backoff counter.
+            pass
 
 
 def run_cycle(bot: dict):
@@ -73,7 +89,8 @@ def run_cycle(bot: dict):
         return
 
     recent_activity = db.get_recent_activity(bot_id=bot["id"], limit=10)
-    decision = content.decide_action(bot, recent_activity)
+    suggested_queries = keywords.suggest_queries(bot["niche"])
+    decision = content.decide_action(bot, recent_activity, suggested_queries)
     db.log_activity(bot["id"], "decision", json.dumps(decision))
 
     action = decision.get("action")
