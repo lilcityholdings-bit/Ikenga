@@ -91,3 +91,23 @@ from reading the code alone — they needed the deploy path actually exercised:
    already solved this correctly (sweep only past a size threshold); these two didn't follow that
    pattern. Fixed to match it, with regression tests proving replay/idempotency correctness is
    unchanged and that the maps still eventually shed expired entries.
+3. **The container failed to start at all on a real cloud platform.** Deployed to Railway with a
+   persistent volume at `/app/data`, and it crash-looped on `FATAL: could not open the
+   write-ahead log: Permission denied (os error 13)`. The Dockerfile `chown`'d `/app/data` to the
+   `ikenga` user at *build* time, but any platform mounting a volume there at *container start*
+   (Railway, a Kubernetes PVC, a plain `docker run -v`) silently replaces that ownership with
+   whatever the fresh volume's default is — root, here. `docker compose` never caught this because
+   its named volume happened to come back owned correctly; a platform's volume didn't. Fixed with
+   `entrypoint.sh`: the container now starts as root, `chown`s `/app/data` *after* the volume is
+   actually mounted, then drops to the unprivileged `ikenga` user via `setpriv` before ever
+   executing the server binary. Verified live: reproduced the exact failure with a fresh Docker
+   named volume mounted over `/app/data`, confirmed it broke the old Dockerfile the same way
+   Railway did, then confirmed the fixed image starts clean, reports `healthy`, and that the
+   actual server process (not just an unrelated `docker exec`) runs as UID 999, not root.
+
+## Deployed
+
+Live on Railway as of this round: build from `services/matching-engine/Dockerfile` via
+`rootDirectory: services/matching-engine`, a persistent volume mounted at `/app/data`,
+`IKENGA_ENV=production` with a real `IKENGA_OWNER_KEY`. See the project in the Railway dashboard
+for the current URL and status.

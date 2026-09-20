@@ -24,16 +24,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --system --create-home --home-dir /app ikenga
 WORKDIR /app
 COPY --from=builder /build/target/release/ikenga-matching-engine /app/ikenga-matching-engine
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # The WAL's default path (data/ikenga.wal, relative to the working directory) lives here so a
 # volume mounted at /app/data is all that's needed for durability across container restarts —
 # see docs/CUSTODY.md and src/wal.rs for why this file is what makes a restart survivable.
-RUN mkdir -p /app/data && chown -R ikenga:ikenga /app
-USER ikenga
+#
+# Deliberately NOT `chown`ing /app/data here and dropping to USER ikenga at the image level: a
+# platform's persistent volume (Railway, a Kubernetes PVC, a plain `docker run -v`) mounts OVER
+# this directory at container *start*, not build, silently replacing whatever ownership the
+# image set — verified live: this exact setup failed on Railway with "could not open the
+# write-ahead log: Permission denied" because /app/data came back root-owned once the volume
+# was attached, despite the build-time chown. entrypoint.sh fixes ownership after the volume is
+# actually mounted, then drops to the unprivileged `ikenga` user before running anything else.
+RUN mkdir -p /app/data
+USER root
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/app/ikenga-matching-engine", "--healthcheck"]
 
-ENTRYPOINT ["/app/ikenga-matching-engine"]
+ENTRYPOINT ["/app/entrypoint.sh"]
