@@ -6,15 +6,81 @@ a Streamlit dashboard.
 
 ## Hosting
 
-Publishing works against any static host that serves from a git repo.
-GitHub Pages is the default; Netlify, Cloudflare Pages, and Vercel all
-work the same way and all have free tiers.
+### Why GitHub Pages restricts this
 
-Set `CUSTOM_DOMAIN` to publish a `CNAME` file and serve from a domain you
-own, and/or `SITE_BASE_URL` to control the absolute URLs used in
-canonicals, sitemap, and Open Graph tags. A domain you own is worth the
-~$10/yr — the authority you build accrues to you instead of to a
-subfolder on `github.io`, and you can move hosts later without losing it.
+GitHub Pages is free static hosting bundled with a code host. The
+restriction on running a business off it comes down to three things:
+
+1. **Cost-shifting.** Pages serves generous bandwidth for free, on free
+   accounts, with GitHub absorbing the CDN bill. That works when Pages is
+   used for what it's for — project docs, portfolios, open-source sites.
+   It stops working if it becomes free production hosting for businesses
+   that would otherwise pay someone for it.
+2. **It's a developer tool, not a hosting company.** Pages exists to
+   publish docs next to your code. GitHub doesn't want to own uptime,
+   payment flows, or commercial disputes.
+3. **Spam and domain reputation — the real driver.** `github.io` has
+   enormous accumulated domain authority, and free instant static hosting
+   on a high-authority domain is exactly what SEO spam, affiliate spam
+   networks, and scam sites want. The "get-rich-quick schemes" clause is
+   an anti-abuse provision.
+
+Worth understanding point 3 clearly: the rule isn't aimed at developers
+making money. It's aimed at people renting GitHub's domain reputation to
+rank spam. An automated affiliate site has legitimate intent but is
+*architecturally identical* to the abuse pattern, which is why it lands
+on the wrong side of the line.
+
+### How to run it anyway — serve the site off Pages
+
+**The code barely changes.** Cloudflare Pages and Netlify both deploy
+*from a GitHub repo*, which is exactly what this publisher already writes
+to. So the flow becomes:
+
+```
+bot --(GitHub Contents API)--> public site repo --(auto-deploy)--> Cloudflare Pages --> your domain
+```
+
+GitHub goes back to being what it's for — storing source. Nothing in
+GitHub's terms restricts *keeping the source of an affiliate site in a
+repo*; the restriction is on Pages serving it. Pages just gets switched
+off.
+
+**Recommended hosts** (both allow commercial/affiliate content on free
+tiers):
+
+| Host | Free tier | Notes |
+|---|---|---|
+| **Cloudflare Pages** | Unlimited bandwidth, 500 builds/mo | Best fit |
+| **Netlify** | 100 GB/mo bandwidth | Also fine |
+
+**Avoid Vercel's free tier for this.** Vercel's Hobby plan is
+non-commercial only and names this case explicitly: *"Affiliate linking
+is the primary purpose of the site"* is listed as commercial usage
+requiring a paid plan. It's a worse fit than Pages, not a better one.
+
+### Setup
+
+1. In the **public site repo**: Settings → Pages → set source to **None**
+   (stop Pages serving it).
+2. Cloudflare Pages → Create project → connect that repo. Build command:
+   none. Output directory: whatever `GITHUB_PAGES_FOLDER` is (`docs`).
+3. Add your domain in Cloudflare Pages (or use the free
+   `*.pages.dev` subdomain to start).
+4. Set `SITE_BASE_URL` to the live URL on **both** services, e.g.
+   `SITE_BASE_URL=https://yoursite.com`. Everything — canonicals,
+   sitemap, Open Graph, IndexNow — follows it automatically.
+5. Leave `CUSTOM_DOMAIN` unset unless you're still on GitHub Pages; it
+   only writes the Pages-specific `CNAME` file.
+
+Every bot commit to the repo triggers a Cloudflare deploy. No code change
+required.
+
+### About the domain
+
+A domain you own is worth the ~$10/yr regardless of host: the authority
+you build accrues to *you*, and you can change hosts later without losing
+it. On a shared subdomain you're building someone else's asset.
 
 ## Two processes, not one
 

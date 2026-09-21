@@ -10,6 +10,8 @@ robots.txt + sitemap.xml is what that relies on — but it's a real,
 working, zero-cost lever for the engines that do support it.
 """
 
+from urllib.parse import urlparse
+
 import requests
 
 from config import settings
@@ -42,13 +44,19 @@ def ensure_key_file_published():
 
 
 def submit_url(url: str):
-    if not url or not settings.GITHUB_USERNAME:
+    if not url:
         return
-    key = _get_or_create_key()
-    host = f"{settings.GITHUB_USERNAME}.github.io"
     base = publisher.site_url()
     if not base:
         return
+    # Host must match the host of the URLs being submitted, or IndexNow
+    # rejects the whole batch with a 422. Derive it from the live site URL
+    # rather than assuming github.io — the site may be served from a custom
+    # domain or an entirely different host.
+    host = urlparse(base).hostname
+    if not host:
+        return
+    key = _get_or_create_key()
     try:
         requests.post(
             "https://api.indexnow.org/indexnow",
