@@ -43,6 +43,25 @@ SEARCH_CONSOLE_VERIFICATION = _env("SEARCH_CONSOLE_VERIFICATION", "")
 # modification, downloaded into the site repo, and credited on the page.
 ENABLE_ARTICLE_IMAGES = _env("ENABLE_ARTICLE_IMAGES", "true").lower() == "true"
 
+# --- Crypto trading — places REAL orders with REAL money once
+# trading_enabled is flipped on in the dashboard. See README before
+# touching any of this. CRYPTO_EXCHANGE is any ccxt exchange id
+# (kraken, coinbase, binance, ...) — the API key on that exchange must
+# be trade+read only, NEVER withdrawal-capable.
+CRYPTO_EXCHANGE = _env("CRYPTO_EXCHANGE", "kraken")
+CRYPTO_API_KEY = _env("CRYPTO_API_KEY")
+CRYPTO_API_SECRET = _env("CRYPTO_API_SECRET")
+CRYPTO_QUOTE_CURRENCY = _env("CRYPTO_QUOTE_CURRENCY", "USD")
+CRYPTO_TRADING_PAIRS = _env("CRYPTO_TRADING_PAIRS", "BTC/USD,ETH/USD")
+TRADING_TIMEFRAME = _env("TRADING_TIMEFRAME", "1h")
+
+# Safety limits — review these before enabling. They're deliberately
+# conservative defaults, not a recommendation of how much to risk.
+TRADING_MAX_POSITION_USD = float(_env("TRADING_MAX_POSITION_USD", "25"))
+TRADING_DAILY_LOSS_LIMIT_USD = float(_env("TRADING_DAILY_LOSS_LIMIT_USD", "50"))
+TRADING_MAX_OPEN_POSITIONS = int(_env("TRADING_MAX_OPEN_POSITIONS", "2"))
+TRADING_LOOP_INTERVAL_SECONDS = int(_env("TRADING_LOOP_INTERVAL_SECONDS", "900"))
+
 # --- Dashboard ---
 DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
 

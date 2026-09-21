@@ -1,8 +1,66 @@
 # Ikenga — Money Bots
 
 An autonomous content system: bots research the web, decide what to do,
-and publish real articles to a free GitHub Pages site. You control it from
-a Streamlit dashboard.
+and publish real articles to a free GitHub Pages site. It also includes
+an optional crypto trading module that places real orders with real
+money — read that section carefully before enabling it. You control it
+all from a Streamlit dashboard.
+
+## Crypto trading — read this before enabling
+
+`core/trading/` places real market orders on a real exchange, with real
+money, once you set `trading_enabled` in the dashboard. Understand what
+it actually is before turning it on:
+
+**What it is.** A moving-average crossover strategy (SMA-10 crosses
+SMA-30) computed from real price data — a simple, well-known, and
+*deterministic* momentum signal. It is not an LLM deciding trades.
+That's deliberate: a model that can hallucinate reasoning has no
+business sizing an order. The LLM stack elsewhere in this repo never
+touches the trading path at all.
+
+**What it is not.** A profitable strategy, verified or otherwise. SMA
+crossover is a textbook starting point, not an edge. Nothing about this
+system implies it makes money — the same honesty that applies to the
+content/affiliate side applies here, more so, because losses here are
+real and immediate rather than just wasted time.
+
+**The three hard limits, all enforced in code regardless of what the
+strategy signals** (`core/trading/risk.py`):
+
+1. `TRADING_MAX_POSITION_USD` — a hard ceiling per order. The strategy
+   never gets to size its own trade.
+2. `TRADING_MAX_OPEN_POSITIONS` — a hard ceiling on how many pairs can be
+   held at once.
+3. **A daily circuit breaker.** Before every tick, the bot checks the
+   current value of the pairs and cash it manages against that day's
+   starting value. If the loss exceeds `TRADING_DAILY_LOSS_LIMIT_USD`,
+   trading halts completely — no more orders — until you manually clear
+   it from the dashboard. It does **not** auto-resume if the price
+   recovers; that's intentional, so a volatile day can't quietly flip the
+   breaker on and off while you're not watching.
+
+**Defaults are conservative on purpose** (`$25`/trade, `$50`/day, 2 open
+positions) because I have no visibility into your risk tolerance or how
+much capital you're using. Review and adjust them — via env vars, not in
+the dashboard — before enabling.
+
+**Before you set `CRYPTO_API_KEY`/`CRYPTO_API_SECRET`:** on whatever
+exchange you use, create a key scoped to **trade + read only**. Do **not**
+enable withdrawal permission on it. This is the single most important
+setting here — if that key ever leaks (a misconfigured env var, a
+compromised host, a bug), a trade-only key limits the damage to bad
+trades inside the account, which is recoverable. A withdrawal-capable key
+can empty the account outright.
+
+**Testing note:** this was verified with extensive mocked tests (the SMA
+math, the risk engine's clamping/circuit-breaker/position-cap logic, and
+the controller's buy/sell/error-isolation paths all pass), but never
+against a live exchange connection with real credentials, because I don't
+have any. Start with the smallest `TRADING_MAX_POSITION_USD` you're
+comfortable losing entirely, watch the dashboard's trade log for at least
+a few real cycles, and only raise the limits once you trust what you're
+seeing.
 
 ## Hosting
 

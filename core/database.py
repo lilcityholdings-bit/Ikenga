@@ -80,6 +80,34 @@ CREATE TABLE IF NOT EXISTS code_proposals (
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,
+    side TEXT NOT NULL,
+    amount REAL NOT NULL,
+    price REAL,
+    usd_value REAL,
+    order_id TEXT,
+    status TEXT NOT NULL,
+    reasoning TEXT,
+    ts TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trading_activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trading_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    daily_date TEXT,
+    daily_start_value_usd REAL,
+    tripped INTEGER NOT NULL DEFAULT 0,
+    reason TEXT
+);
 """
 
 
@@ -349,3 +377,69 @@ def list_code_proposals(status: str = None) -> list:
 def update_code_proposal_status(proposal_id: int, status: str):
     with get_conn() as conn:
         conn.execute("UPDATE code_proposals SET status=? WHERE id=?", (status, proposal_id))
+
+
+# --- trading ---
+
+def record_trade(pair, side, amount, price, usd_value, order_id, status, reasoning):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO trades (pair, side, amount, price, usd_value, order_id, status, "
+            "reasoning, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (pair, side, amount, price, usd_value, order_id, status, reasoning, _now()),
+        )
+
+
+def list_trades(limit: int = 50) -> list:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def log_trading_activity(kind: str, detail: str = ""):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO trading_activity_log (ts, kind, detail) VALUES (?, ?, ?)",
+            (_now(), kind, detail),
+        )
+
+
+def get_recent_trading_activity(limit: int = 30) -> list:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trading_activity_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_trading_state():
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM trading_state WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def reset_trading_day(daily_date: str, start_value_usd: float):
+    """Called once per UTC day: records the portfolio's starting value so
+    the circuit breaker has a baseline to measure loss against, and clears
+    any previous trip."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO trading_state (id, daily_date, daily_start_value_usd, tripped, reason) "
+            "VALUES (1, ?, ?, 0, NULL) "
+            "ON CONFLICT(id) DO UPDATE SET daily_date=excluded.daily_date, "
+            "daily_start_value_usd=excluded.daily_start_value_usd, tripped=0, reason=NULL",
+            (daily_date, start_value_usd),
+        )
+
+
+def trip_circuit_breaker(reason: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE trading_state SET tripped=1, reason=? WHERE id=1", (reason,))
+
+
+def clear_circuit_breaker():
+    """Manual override from the dashboard — does not touch daily_start_value_usd,
+    so the loss is still measured against the same baseline for the rest of
+    the day."""
+    with get_conn() as conn:
+        conn.execute("UPDATE trading_state SET tripped=0, reason=NULL WHERE id=1")

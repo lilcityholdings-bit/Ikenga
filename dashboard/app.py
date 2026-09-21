@@ -13,6 +13,7 @@ import streamlit as st
 from agents.bot_template import ensure_bots_seeded
 from config import settings
 from core import controller, database as db, publisher
+from core.trading import exchange as trading_exchange
 
 st.set_page_config(page_title="Money Bots", page_icon="🤖", layout="wide")
 
@@ -210,4 +211,70 @@ for proposal in pending_proposals:
             st.rerun()
 
 st.divider()
-st.caption("Spending approval gate is symbolic — there is no payment integration yet.")
+st.caption(
+    "Spending approval gate above is symbolic for the content bots — there's "
+    "no payment integration there. The trading panel below is different: it "
+    "moves real money."
+)
+
+# --- Crypto trading (real money) ---
+st.subheader("💰 Crypto Trading")
+
+if not trading_exchange.is_configured():
+    st.caption(
+        "Not configured — set CRYPTO_EXCHANGE, CRYPTO_API_KEY, and "
+        "CRYPTO_API_SECRET to enable. Use a trade+read-only API key, "
+        "never one with withdrawal permission."
+    )
+else:
+    st.error(
+        "This places REAL market orders with REAL money using a "
+        "deterministic moving-average strategy. It is not guaranteed to be "
+        "profitable — review the limits below before turning it on."
+    )
+
+    limit_col1, limit_col2, limit_col3 = st.columns(3)
+    limit_col1.metric("Max position", f"${settings.TRADING_MAX_POSITION_USD:.0f}")
+    limit_col2.metric("Daily loss limit", f"${settings.TRADING_DAILY_LOSS_LIMIT_USD:.0f}")
+    limit_col3.metric("Max open positions", settings.TRADING_MAX_OPEN_POSITIONS)
+    st.caption(
+        "Change these with TRADING_MAX_POSITION_USD / TRADING_DAILY_LOSS_LIMIT_USD "
+        "/ TRADING_MAX_OPEN_POSITIONS env vars, not here."
+    )
+
+    trading_enabled = db.get_setting("trading_enabled", "false") == "true"
+    new_trading_enabled = st.toggle("Trading Enabled", value=trading_enabled, key="trading-toggle")
+    if new_trading_enabled != trading_enabled:
+        db.set_setting("trading_enabled", "true" if new_trading_enabled else "false")
+        st.rerun()
+
+    trading_state = db.get_trading_state()
+    if trading_state and trading_state.get("tripped"):
+        st.error(f"🔴 Circuit breaker TRIPPED: {trading_state['reason']}")
+        if st.button("Clear circuit breaker (resume trading)"):
+            db.clear_circuit_breaker()
+            st.rerun()
+    elif trading_state and trading_state.get("daily_start_value_usd") is not None:
+        st.success(
+            f"🟢 Circuit breaker OK — today started at "
+            f"${trading_state['daily_start_value_usd']:.2f}"
+        )
+    else:
+        st.caption("No trading activity yet — baseline is set on the first tick.")
+
+    st.markdown("**Recent trades**")
+    trades = db.list_trades(limit=10)
+    if not trades:
+        st.caption("No trades yet.")
+    for t in trades:
+        st.text(
+            f"[{t['ts']}] {t['side'].upper()} {t['amount']:.6f} {t['pair']} "
+            f"(~${(t['usd_value'] or 0):.2f}) — {t['status']}"
+        )
+
+    st.markdown("**Trading activity**")
+    trading_activity = db.get_recent_trading_activity(limit=15)
+    if not trading_activity:
+        st.caption("No activity yet.")
+    for a in trading_activity:
+        st.text(f"[{a['ts']}] {a['kind']}: {a['detail']}")

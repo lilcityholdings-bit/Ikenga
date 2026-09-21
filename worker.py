@@ -2,14 +2,32 @@
 separate from the dashboard. Crash-proof by design: any exception during a
 tick is logged and the loop keeps going rather than exiting, so a bad
 response from a free LLM tier can't take the whole worker down.
+
+Runs two independent ticks off the same loop: the content bots (every
+WORKER_LOOP_INTERVAL_SECONDS) and, if configured, the crypto trading tick
+(every TRADING_LOOP_INTERVAL_SECONDS, gated separately since it should run
+far less often than the content loop).
 """
 
 import time
 import traceback
+from datetime import datetime, timezone
 
 from agents.bot_template import ensure_bots_seeded
 from config import settings
 from core import controller, database as db
+from core.trading import controller as trading_controller
+
+
+def _maybe_run_trading_tick():
+    last = db.get_setting("trading_last_tick")
+    now = datetime.now(timezone.utc)
+    if last:
+        elapsed = (now - datetime.fromisoformat(last)).total_seconds()
+        if elapsed < settings.TRADING_LOOP_INTERVAL_SECONDS:
+            return
+    db.set_setting("trading_last_tick", now.isoformat())
+    trading_controller.run_trading_tick()
 
 
 def main():
@@ -19,6 +37,10 @@ def main():
     while True:
         try:
             controller.run_worker_tick()
+        except Exception:
+            traceback.print_exc()
+        try:
+            _maybe_run_trading_tick()
         except Exception:
             traceback.print_exc()
         time.sleep(settings.WORKER_LOOP_INTERVAL_SECONDS)
