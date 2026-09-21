@@ -7,6 +7,11 @@ Runs two independent ticks off the same loop: the content bots (every
 WORKER_LOOP_INTERVAL_SECONDS) and, if configured, the crypto trading tick
 (every TRADING_LOOP_INTERVAL_SECONDS, gated separately since it should run
 far less often than the content loop).
+
+The trading tick only runs in TRADING_MODE=poll. In TRADING_MODE=realtime,
+trading_stream.py owns it instead (a persistent websocket connection, not
+a fit for this loop) — this file must stay out of its way entirely, or
+the same account could get traded by both at once.
 """
 
 import time
@@ -20,6 +25,8 @@ from core.trading import controller as trading_controller
 
 
 def _maybe_run_trading_tick():
+    if settings.TRADING_MODE != "poll":
+        return  # owned by trading_stream.py in realtime mode
     last = db.get_setting("trading_last_tick")
     now = datetime.now(timezone.utc)
     if last:

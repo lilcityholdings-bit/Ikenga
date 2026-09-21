@@ -13,7 +13,7 @@ import streamlit as st
 from agents.bot_template import ensure_bots_seeded
 from config import settings
 from core import controller, database as db, publisher
-from core.trading import exchange as trading_exchange
+from core.trading import exchange as trading_exchange, realtime as trading_realtime
 
 st.set_page_config(page_title="Money Bots", page_icon="🤖", layout="wide")
 
@@ -232,6 +232,19 @@ else:
         "deterministic moving-average strategy. It is not guaranteed to be "
         "profitable — review the limits below before turning it on."
     )
+
+    if settings.TRADING_MODE == "realtime":
+        stream_age = db.get_setting_age_seconds(trading_realtime.HEARTBEAT_SETTING_KEY)
+        if stream_age is not None and stream_age < trading_realtime.HEARTBEAT_INTERVAL_SECONDS * 3:
+            st.success(f"🟢 Realtime stream connected (heartbeat {stream_age:.0f}s ago)")
+        else:
+            st.error(
+                "🔴 Realtime stream not running — start it as its own service "
+                "(`python trading_stream.py`). TRADING_MODE=realtime, so the "
+                "polling worker will NOT trade in its place."
+            )
+    else:
+        st.caption("TRADING_MODE=poll — checked on a timer by worker.py.")
 
     limit_col1, limit_col2, limit_col3 = st.columns(3)
     limit_col1.metric("Max position", f"${settings.TRADING_MAX_POSITION_USD:.0f}")

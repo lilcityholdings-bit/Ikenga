@@ -62,6 +62,17 @@ TRADING_DAILY_LOSS_LIMIT_USD = float(_env("TRADING_DAILY_LOSS_LIMIT_USD", "50"))
 TRADING_MAX_OPEN_POSITIONS = int(_env("TRADING_MAX_OPEN_POSITIONS", "2"))
 TRADING_LOOP_INTERVAL_SECONDS = int(_env("TRADING_LOOP_INTERVAL_SECONDS", "900"))
 
+# TRADING_MODE "poll" (default): worker.py checks prices on a timer, every
+# TRADING_LOOP_INTERVAL_SECONDS. "realtime": a separate process
+# (trading_stream.py) holds a live websocket connection and reacts the
+# instant a new candle closes, on REALTIME_CANDLE_INTERVAL_SECONDS candles
+# it builds from the live price stream. These two modes are mutually
+# exclusive against the same account — worker.py skips its own trading
+# tick entirely when TRADING_MODE=realtime, so the two can never both
+# place orders for the same pairs at once.
+TRADING_MODE = _env("TRADING_MODE", "poll")
+REALTIME_CANDLE_INTERVAL_SECONDS = int(_env("REALTIME_CANDLE_INTERVAL_SECONDS", "60"))
+
 # --- Dashboard ---
 DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
 

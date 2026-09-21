@@ -261,6 +261,17 @@ def get_heartbeat_age_seconds():
     return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
+def get_setting_age_seconds(key: str):
+    """Generic version of get_heartbeat_age_seconds for any ISO-timestamp
+    value stored via set_setting — used by the realtime trading stream's
+    own heartbeat, which is a separate process from the main worker."""
+    value = get_setting(key)
+    if not value:
+        return None
+    ts = datetime.fromisoformat(value)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
 # --- key/value settings (e.g. auto_mode) ---
 
 def get_setting(key: str, default=None):

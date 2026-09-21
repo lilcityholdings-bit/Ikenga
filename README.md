@@ -53,11 +53,53 @@ compromised host, a bug), a trade-only key limits the damage to bad
 trades inside the account, which is recoverable. A withdrawal-capable key
 can empty the account outright.
 
-**Testing note:** this was verified with extensive mocked tests (the SMA
-math, the risk engine's clamping/circuit-breaker/position-cap logic, and
-the controller's buy/sell/error-isolation paths all pass), but never
-against a live exchange connection with real credentials, because I don't
-have any. Start with the smallest `TRADING_MAX_POSITION_USD` you're
+### Two trading modes — pick exactly one
+
+Set `TRADING_MODE`. These are mutually exclusive against the same
+account — running both means the same balance could get traded twice.
+`worker.py` automatically refuses to run its own trading tick when
+`TRADING_MODE=realtime`, specifically to prevent that.
+
+| | `poll` (default) | `realtime` |
+|---|---|---|
+| Process | `worker.py` (shared with content bots) | `trading_stream.py` (its own process) |
+| How it notices price moves | Checks on a timer, every `TRADING_LOOP_INTERVAL_SECONDS` (15 min default) | A live websocket connection — notified the instant a price updates, no polling delay |
+| Candle size | `TRADING_TIMEFRAME` (1h default) | `REALTIME_CANDLE_INTERVAL_SECONDS` (60s default) |
+| Connection | None held open | Persistent, with automatic reconnect + backoff on drops |
+
+**What "real time" actually means here, precisely**, because it's easy to
+overstate: the moving-average strategy only ever produces a new signal
+when a candle closes — that's what a moving average is, there's nothing
+new to compute between candles. So `realtime` mode doesn't make the
+*strategy* react to every single price tick (that would be meaningless
+for an SMA signal); it makes the bot (a) use a much shorter candle — a
+minute instead of an hour — and (b) notice the instant that candle
+closes instead of finding out up to 15 minutes late. Both together are
+what "real time" buys you.
+
+**Coinbase-specific note:** Coinbase's websocket API doesn't stream
+candles or account balances directly (`watchOHLCV` and `watchBalance`
+are both unsupported there in ccxt). So `realtime` mode streams live
+ticker price and builds its own candles from that price stream locally
+(`core/trading/realtime.py`'s `CandleBuilder`), and reads balances via a
+plain (fast) API call at signal time rather than a stream. This is
+normal practice when an exchange doesn't offer streaming candles, not a
+workaround for a bug.
+
+**Running `realtime` mode:** deploy `trading_stream.py` as its own
+service (e.g. a third Railway service, alongside the dashboard and
+worker), with the same environment variables plus `TRADING_MODE=realtime`
+on that service specifically. It holds a websocket connection for as
+long as it runs — if it dies (crash, redeploy, host restart), no trades
+happen until it's back up; the dashboard's trading panel shows whether
+the stream's heartbeat is current or stale.
+
+**Testing note:** this was verified with extensive mocked tests — the SMA
+math, the risk engine's clamping/circuit-breaker/position-cap logic, both
+controllers' buy/sell/error-isolation paths, the realtime candle builder,
+and the realtime engine's reconnect-with-backoff behavior all pass — but
+never against a live exchange connection with real credentials, because I
+don't have any. Start with the smallest `TRADING_MAX_POSITION_USD` you're
 comfortable losing entirely, watch the dashboard's trade log for at least
 a few real cycles, and only raise the limits once you trust what you're
 seeing.
@@ -140,20 +182,22 @@ A domain you own is worth the ~$10/yr regardless of host: the authority
 you build accrues to *you*, and you can change hosts later without losing
 it. On a shared subdomain you're building someone else's asset.
 
-## Two processes, not one
+## Two processes, not one (three with realtime trading)
 
-This is **two separate processes** — running only the web service means
-the dashboard loads, Auto Mode flips ON, and nothing happens (no error, no
-clue). The dashboard's health panel exists to catch exactly this.
+This is **two separate processes** at minimum — running only the web
+service means the dashboard loads, Auto Mode flips ON, and nothing
+happens (no error, no clue). The dashboard's health panel exists to catch
+exactly this.
 
 | Process | Command | What it does |
 |---|---|---|
 | Web | `python run.py` (or `streamlit run dashboard/app.py`) | The dashboard you look at and click |
-| Worker | `python worker.py` | The loop that actually runs the bots |
+| Worker | `python worker.py` | The loop that actually runs the content bots, and the crypto trading tick if `TRADING_MODE=poll` |
+| Trading stream (optional) | `python trading_stream.py` | Only if `TRADING_MODE=realtime` — a persistent websocket connection for the crypto trading module. Don't run this alongside a worker also doing polling-mode trading against the same account. |
 
-Both processes need the same environment variables. Deploy both as
-separate services (e.g. two Railway services in one project) and give
-each its own copy of the `.env` values.
+All processes need the same environment variables. Deploy each as a
+separate service (e.g. two or three Railway services in one project) and
+give each its own copy of the `.env` values.
 
 ## Setup
 
