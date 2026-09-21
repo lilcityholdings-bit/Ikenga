@@ -35,11 +35,16 @@ ARTICLE_SYSTEM_PROMPT = (
     "not the general niche. If a relevant affiliate link is provided, you "
     "may mention it naturally at most once, inside a normal <a> tag, only "
     "where it genuinely fits — never force one in and never mention more "
-    "than one. Respond with strict JSON only: "
-    '{"title": "...", "body_html": "..."}. body_html must be simple semantic '
-    "HTML (p, h2, ul, li, strong, a) with no script or style tags, at least "
-    "300 words."
+    "than one. Also produce 3-5 FAQ entries: real questions someone "
+    "searching this topic would ask, each with a direct, self-contained "
+    "answer of 1-3 sentences. Respond with strict JSON only: "
+    '{"title": "...", "body_html": "...", '
+    '"faq": [{"question": "...", "answer": "..."}]}. '
+    "body_html must be simple semantic HTML (p, h2, ul, li, strong, a) with "
+    "no script or style tags, at least 300 words. FAQ questions and answers "
+    "must be plain text, not HTML."
 )
+MAX_FAQ_ENTRIES = 5
 
 
 class ContentError(Exception):
@@ -102,4 +107,27 @@ def generate_article(
 
     result["title"] = redact_secrets(result["title"], secrets_to_redact)
     result["body_html"] = redact_secrets(result["body_html"], secrets_to_redact)
+    result["faq"] = _clean_faq(result.get("faq"), secrets_to_redact)
     return result
+
+
+def _clean_faq(raw_faq, secrets_to_redact: list) -> list:
+    """Keep only well-formed question/answer pairs. A missing or malformed
+    FAQ just means the article publishes without one."""
+    if not isinstance(raw_faq, list):
+        return []
+    entries = []
+    for item in raw_faq:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if not question or not answer:
+            continue
+        entries.append({
+            "question": redact_secrets(question, secrets_to_redact),
+            "answer": redact_secrets(answer, secrets_to_redact),
+        })
+        if len(entries) >= MAX_FAQ_ENTRIES:
+            break
+    return entries

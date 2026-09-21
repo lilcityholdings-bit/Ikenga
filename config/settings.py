@@ -38,6 +38,11 @@ SITE_BASE_URL = _env("SITE_BASE_URL")
 ANALYTICS_SNIPPET = _env("ANALYTICS_SNIPPET", "")
 SEARCH_CONSOLE_VERIFICATION = _env("SEARCH_CONSOLE_VERIFICATION", "")
 
+# --- Article images ---
+# Sourced from Openverse, filtered to licenses allowing commercial use and
+# modification, downloaded into the site repo, and credited on the page.
+ENABLE_ARTICLE_IMAGES = _env("ENABLE_ARTICLE_IMAGES", "true").lower() == "true"
+
 # --- Dashboard ---
 DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
 

@@ -20,7 +20,7 @@ import re
 import requests
 
 from config import settings
-from core import database as db
+from core import database as db, images
 from core.security import safe_slug, sanitize_html
 
 API_ROOT = "https://api.github.com"
@@ -112,6 +112,21 @@ def put_text_file(path: str, content_str: str, message: str):
     return _put_file(path, content_str, message)
 
 
+def _put_binary_file(path: str, data: bytes, message: str):
+    existing = _get_file(path)
+    payload = {
+        "message": message,
+        "content": base64.b64encode(data).decode("ascii"),
+        "branch": settings.GITHUB_BRANCH,
+    }
+    if existing:
+        payload["sha"] = existing["sha"]
+    resp = requests.put(_contents_url(path), headers=_headers(), json=payload, timeout=TIMEOUT)
+    if resp.status_code not in (200, 201):
+        raise PublishError(f"GitHub image upload failed ({resp.status_code}): {resp.text[:300]}")
+    return resp.json()
+
+
 def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -156,16 +171,20 @@ ARTICLE_TEMPLATE = """<!DOCTYPE html>
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{description}">
 <meta property="og:url" content="{canonical}">
+{og_image}
 <script type="application/ld+json">
-{{"@context":"https://schema.org","@type":"Article","headline":{title_json},"description":{description_json},"url":{canonical_json}}}
+{{"@context":"https://schema.org","@type":"Article","headline":{title_json},"description":{description_json},"url":{canonical_json}{image_json_field}}}
 </script>
+{faq_json_ld}
 {head_extras}
 </head>
 <body>
 <article>
 <h1>{title}</h1>
 <p><em>{disclosure}</em></p>
+{figure}
 {body}
+{faq}
 </article>
 {related}
 <p><a href="../index.html">&larr; Back to home</a></p>
@@ -333,6 +352,74 @@ def _render_related(related: list) -> str:
     return f"<aside>\n<h2>Related</h2>\n<ul>\n{items}</ul>\n</aside>"
 
 
+def _publish_image(folder: str, slug: str, image: dict):
+    """Download the chosen image and republish it alongside the article.
+    Returns the rendered <figure> and the image's absolute URL, or
+    ("", None) if anything goes wrong — an article without an image is
+    fine, a failed publish is not."""
+    downloaded = images.download_image(image["url"])
+    if not downloaded:
+        return "", None
+    data, extension = downloaded
+    image_path = f"{folder}/images/{slug}{extension}"
+    _put_binary_file(image_path, data, message=f"Add image for {slug}")
+
+    base = site_url()
+    absolute_url = f"{base}images/{slug}{extension}" if base else None
+
+    # CC licenses require attribution — Openverse hands us the exact string.
+    attribution = image.get("attribution") or (
+        f'"{image["title"]}" by {image["creator"]} '
+        f'is licensed under CC {image["license"]} {image["license_version"]}.'
+    )
+    credit = _escape(attribution)
+    if image.get("source_url"):
+        credit = f'<a href="{_escape(image["source_url"])}" rel="nofollow noopener">{credit}</a>'
+
+    figure = (
+        f'<figure>\n'
+        f'<img src="../images/{slug}{extension}" alt="{_escape(image["title"])}" loading="lazy">\n'
+        f'<figcaption>{credit}</figcaption>\n'
+        f'</figure>'
+    )
+    return figure, absolute_url
+
+
+def _render_faq(faq: list) -> str:
+    if not faq:
+        return ""
+    blocks = "".join(
+        f"<h3>{_escape(entry['question'])}</h3>\n<p>{_escape(entry['answer'])}</p>\n"
+        for entry in faq
+    )
+    return f"<section>\n<h2>Frequently asked questions</h2>\n{blocks}</section>"
+
+
+def _faq_json_ld(faq: list) -> str:
+    """FAQPage markup. The same Q&A is rendered visibly on the page above —
+    structured data describing content a visitor can't see is a structured
+    data policy violation."""
+    if not faq:
+        return ""
+    payload = {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+            {
+                "@type": "Question",
+                "name": entry["question"],
+                "acceptedAnswer": {"@type": "Answer", "text": entry["answer"]},
+            }
+            for entry in faq
+        ],
+    }
+    return (
+        '<script type="application/ld+json">\n'
+        f"{json.dumps(payload)}\n"
+        "</script>"
+    )
+
+
 def _unique_slug(base_slug: str) -> str:
     """Disambiguate a slug against already-published articles so two
     different titles that happen to truncate/sanitize to the same slug
@@ -346,7 +433,14 @@ def _unique_slug(base_slug: str) -> str:
     return f"{base_slug}-{n}"
 
 
-def publish_article(bot_name: str, title: str, body_html: str, affiliate_urls: set = None) -> dict:
+def publish_article(
+    bot_name: str,
+    title: str,
+    body_html: str,
+    affiliate_urls: set = None,
+    faq: list = None,
+    image: dict = None,
+) -> dict:
     if not is_configured():
         raise PublishError(
             "Publishing isn't set up yet — GITHUB_TOKEN/GITHUB_USERNAME/GITHUB_REPO missing."
@@ -356,6 +450,14 @@ def publish_article(bot_name: str, title: str, body_html: str, affiliate_urls: s
     slug = _unique_slug(safe_slug(title)[:80])
     clean_body = sanitize_html(body_html)
     clean_body = _mark_sponsored_links(clean_body, affiliate_urls or set())
+    faq = faq or []
+
+    figure, image_url = ("", None)
+    if image:
+        try:
+            figure, image_url = _publish_image(folder, slug, image)
+        except Exception:
+            figure, image_url = ("", None)
 
     canonical = f"{site_url()}articles/{slug}.html" if site_url() else ""
     description = _meta_description(clean_body)
@@ -366,9 +468,16 @@ def publish_article(bot_name: str, title: str, body_html: str, affiliate_urls: s
         title_json=_json_string(title),
         description_json=_json_string(description),
         canonical_json=_json_string(canonical),
+        image_json_field=f",\"image\":{_json_string(image_url)}" if image_url else "",
+        og_image=(
+            f'<meta property="og:image" content="{_escape(image_url)}">' if image_url else ""
+        ),
+        faq_json_ld=_faq_json_ld(faq),
         disclosure=DISCLOSURE,
         head_extras=_head_extras(),
+        figure=figure,
         body=clean_body,
+        faq=_render_faq(faq),
         related=_render_related(_related_articles(title, slug)),
     )
     article_path = f"{folder}/articles/{slug}.html"

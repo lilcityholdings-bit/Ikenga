@@ -90,6 +90,17 @@ list to change niches; new entries are seeded on next startup.
   tags, and JSON-LD `Article` structured data on every page; a
   `sitemap.xml` regenerated on every publish; a `robots.txt` pointing at
   it; a static `about.html` disclosing that content is AI-assisted.
+- **FAQ sections with `FAQPage` structured data.** Each article gets 3–5
+  generated Q&A pairs, rendered visibly on the page *and* marked up as
+  JSON-LD. (Google restricted FAQ rich results to authoritative
+  health/government sites in 2023, so don't expect the rich snippet —
+  the value is answering real question-shaped queries and being
+  extractable by featured snippets and AI answer engines.)
+- **Article images from Openverse** (`core/images.py`), filtered to
+  licenses permitting commercial use and modification, downloaded into
+  the repo rather than hotlinked, credited on-page as the license
+  requires, and wired into `og:image` and the `Article` schema. Set
+  `ENABLE_ARTICLE_IMAGES=false` to turn off.
 - **IndexNow** pushes each new URL to Bing/Yandex immediately instead of
   waiting for organic re-crawl (`core/indexnow.py`). Google doesn't
   participate in IndexNow — for Google, the sitemap + robots.txt above is

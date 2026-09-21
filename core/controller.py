@@ -8,7 +8,9 @@ gates whether that bot runs. Both are required for anything to publish.
 import json
 
 from config import settings
-from core import accounts, content, database as db, indexnow, keywords, publisher, tools
+from core import (
+    accounts, content, database as db, images, indexnow, keywords, publisher, tools,
+)
 from core.security import redact_secrets
 
 
@@ -47,8 +49,21 @@ def _do_publish(bot: dict, decision: dict):
         bot, topic, research_notes, active_links, _configured_secrets()
     )
     affiliate_urls = {link["affiliate_url"] for link in active_links}
+
+    image = None
+    if settings.ENABLE_ARTICLE_IMAGES:
+        try:
+            image = images.find_image(topic)
+        except Exception:
+            image = None
+
     result = publisher.publish_article(
-        bot["name"], article["title"], article["body_html"], affiliate_urls
+        bot["name"],
+        article["title"],
+        article["body_html"],
+        affiliate_urls,
+        faq=article.get("faq"),
+        image=image,
     )
 
     db.add_article(bot["id"], article["title"], result["slug"], result["path"], result["url"])
