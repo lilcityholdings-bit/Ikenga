@@ -4,31 +4,17 @@ An autonomous content system: bots research the web, decide what to do,
 and publish real articles to a free GitHub Pages site. You control it from
 a Streamlit dashboard.
 
-## ⚠️ Read this before monetizing on GitHub Pages
+## Hosting
 
-**GitHub Pages' own terms prohibit the exact thing this repo is built to
-do.** From GitHub's Pages limits documentation:
+Publishing works against any static host that serves from a git repo.
+GitHub Pages is the default; Netlify, Cloudflare Pages, and Vercel all
+work the same way and all have free tiers.
 
-> GitHub Pages is not intended for or allowed to be used as a free
-> web-hosting service to run your online business, e-commerce site, or any
-> other website that is primarily directed at either facilitating
-> commercial transactions or providing commercial software as a service
-> (SaaS).
-
-The same policy separately prohibits **"get-rich-quick schemes."**
-
-An affiliate site whose purpose is earning commissions is plausibly "primarily
-directed at facilitating commercial transactions." Running this monetized on
-GitHub Pages risks the site being taken down and potentially the GitHub
-account being actioned — which would also take out the private code repo.
-
-**If you intend to monetize, publish somewhere that permits it.** Netlify,
-Cloudflare Pages, and Vercel all have free tiers that allow affiliate
-content, and all let you attach a domain you own. Buying a real domain
-(~$10/yr) also means the domain authority you build is *yours* rather than
-a subfolder on `github.io` — which matters for the SEO problem below.
-
-Publishing here unmonetized (no affiliate links) is a much smaller concern.
+Set `CUSTOM_DOMAIN` to publish a `CNAME` file and serve from a domain you
+own, and/or `SITE_BASE_URL` to control the absolute URLs used in
+canonicals, sitemap, and Open Graph tags. A domain you own is worth the
+~$10/yr — the authority you build accrues to you instead of to a
+subfolder on `github.io`, and you can move hosts later without losing it.
 
 ## Two processes, not one
 

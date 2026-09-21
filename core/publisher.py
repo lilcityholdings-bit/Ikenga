@@ -40,9 +40,31 @@ def is_configured() -> bool:
 
 
 def site_url():
+    """Absolute base URL for the live site, with a trailing slash.
+
+    Explicit SITE_BASE_URL wins (any host), then CUSTOM_DOMAIN, then the
+    default github.io project URL.
+    """
+    if settings.SITE_BASE_URL:
+        return settings.SITE_BASE_URL.rstrip("/") + "/"
+    if settings.CUSTOM_DOMAIN:
+        return f"https://{settings.CUSTOM_DOMAIN.strip().strip('/')}/"
     if not settings.GITHUB_USERNAME or not settings.GITHUB_REPO:
         return None
     return f"https://{settings.GITHUB_USERNAME}.github.io/{settings.GITHUB_REPO}/"
+
+
+def _head_extras() -> str:
+    """Analytics + search-console verification, injected into every page."""
+    parts = []
+    if settings.SEARCH_CONSOLE_VERIFICATION:
+        parts.append(
+            f'<meta name="google-site-verification" '
+            f'content="{_escape(settings.SEARCH_CONSOLE_VERIFICATION)}">'
+        )
+    if settings.ANALYTICS_SNIPPET:
+        parts.append(settings.ANALYTICS_SNIPPET)
+    return "\n".join(parts)
 
 
 def _headers():
@@ -137,6 +159,7 @@ ARTICLE_TEMPLATE = """<!DOCTYPE html>
 <script type="application/ld+json">
 {{"@context":"https://schema.org","@type":"Article","headline":{title_json},"description":{description_json},"url":{canonical_json}}}
 </script>
+{head_extras}
 </head>
 <body>
 <article>
@@ -144,17 +167,19 @@ ARTICLE_TEMPLATE = """<!DOCTYPE html>
 <p><em>{disclosure}</em></p>
 {body}
 </article>
+{related}
 <p><a href="../index.html">&larr; Back to home</a></p>
 </body>
 </html>
 """
 
-INDEX_HEADER = """<!DOCTYPE html>
+INDEX_HEADER_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Articles</title>
+{head_extras}
 </head>
 <body>
 <h1>Articles</h1>
@@ -211,7 +236,8 @@ def _update_index(folder: str, title: str, slug: str):
     items = [line for line in items if href_marker not in line]
     entry = f'  <li><a href="articles/{slug}.html">{_escape(title)}</a></li>\n'
     items.insert(0, entry)
-    html = INDEX_HEADER + "".join(items) + INDEX_FOOTER
+    header = INDEX_HEADER_TEMPLATE.format(head_extras=_head_extras())
+    html = header + "".join(items) + INDEX_FOOTER
     _put_file(index_path, html, message=f"Update index: {title}")
 
 
@@ -241,12 +267,70 @@ def _ensure_robots_txt(folder: str):
     _put_file(path, content, message="Add robots.txt")
 
 
+def _ensure_cname(folder: str):
+    """GitHub Pages reads the custom domain from a CNAME file at the served
+    root. Written once; skipped if it already holds the right domain."""
+    if not settings.CUSTOM_DOMAIN:
+        return
+    domain = settings.CUSTOM_DOMAIN.strip().strip("/")
+    path = f"{folder}/CNAME"
+    existing = _get_file(path)
+    if existing:
+        current = base64.b64decode(existing["content"]).decode("utf-8", errors="ignore").strip()
+        if current == domain:
+            return
+    _put_file(path, domain + "\n", message=f"Set custom domain: {domain}")
+
+
 def _ensure_about_page(folder: str):
     path = f"{folder}/about.html"
     if _get_file(path):
         return
     content = ABOUT_TEMPLATE.format(disclosure=DISCLOSURE)
     _put_file(path, content, message="Add about page")
+
+
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "for", "to", "of", "in", "on",
+    "at", "by", "with", "from", "is", "are", "was", "be", "how", "what",
+    "why", "when", "your", "you", "it", "this", "that", "best", "vs",
+}
+
+
+def _keywords(text: str) -> set:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(w) > 2 and w not in STOPWORDS
+    }
+
+
+def _related_articles(title: str, exclude_slug: str, limit: int = 3) -> list:
+    """Pick already-published articles sharing the most keywords with this
+    one. Internal links give crawlers more paths into the site, spread
+    authority between pages, and keep a reader who landed on one article
+    moving to the next."""
+    target = _keywords(title)
+    if not target:
+        return []
+    scored = []
+    for article in db.list_articles():
+        if article["slug"] == exclude_slug:
+            continue
+        overlap = len(target & _keywords(article["title"]))
+        if overlap:
+            scored.append((overlap, article))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [article for _, article in scored[:limit]]
+
+
+def _render_related(related: list) -> str:
+    if not related:
+        return ""
+    items = "".join(
+        f'  <li><a href="{_escape(a["slug"])}.html">{_escape(a["title"])}</a></li>\n'
+        for a in related
+    )
+    return f"<aside>\n<h2>Related</h2>\n<ul>\n{items}</ul>\n</aside>"
 
 
 def _unique_slug(base_slug: str) -> str:
@@ -283,7 +367,9 @@ def publish_article(bot_name: str, title: str, body_html: str, affiliate_urls: s
         description_json=_json_string(description),
         canonical_json=_json_string(canonical),
         disclosure=DISCLOSURE,
+        head_extras=_head_extras(),
         body=clean_body,
+        related=_render_related(_related_articles(title, slug)),
     )
     article_path = f"{folder}/articles/{slug}.html"
 
@@ -292,5 +378,6 @@ def publish_article(bot_name: str, title: str, body_html: str, affiliate_urls: s
     _update_sitemap(folder)
     _ensure_robots_txt(folder)
     _ensure_about_page(folder)
+    _ensure_cname(folder)
 
     return {"slug": slug, "path": article_path, "url": canonical or None}

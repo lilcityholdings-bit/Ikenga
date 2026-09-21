@@ -22,6 +22,22 @@ GITHUB_REPO = _env("GITHUB_REPO")
 GITHUB_BRANCH = _env("GITHUB_BRANCH", "main")
 GITHUB_PAGES_FOLDER = _env("GITHUB_PAGES_FOLDER", "docs")
 
+# --- Site identity ---
+# CUSTOM_DOMAIN publishes a CNAME file so GitHub Pages serves from your own
+# domain. SITE_BASE_URL overrides the absolute base used in canonical URLs,
+# sitemap entries, and Open Graph tags — set it when hosting somewhere other
+# than Pages (Netlify/Cloudflare/Vercel). Falls back to the github.io URL.
+CUSTOM_DOMAIN = _env("CUSTOM_DOMAIN")
+SITE_BASE_URL = _env("SITE_BASE_URL")
+
+# --- Measurement ---
+# ANALYTICS_SNIPPET is raw HTML injected into every page's <head> — use
+# whatever provider you like (Plausible, GA4, Fathom, Cloudflare).
+# SEARCH_CONSOLE_VERIFICATION is just the content value of Google's
+# google-site-verification meta tag.
+ANALYTICS_SNIPPET = _env("ANALYTICS_SNIPPET", "")
+SEARCH_CONSOLE_VERIFICATION = _env("SEARCH_CONSOLE_VERIFICATION", "")
+
 # --- Dashboard ---
 DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
 
