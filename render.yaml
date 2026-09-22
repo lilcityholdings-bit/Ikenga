@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: revenue-bots
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/bots.db
+      - key: DASHBOARD_PASSWORD
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_USERNAME
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: WORKER_INTERVAL_SECONDS
+        value: 300
+      - key: MAX_BOTS
+        value: 6

@@ -1,492 +1,349 @@
-"""Publishes articles to a GitHub Pages site via the GitHub Contents API.
-
-Path traversal is blocked structurally: every file path is built from a
-slug produced by core.security.safe_slug, which only ever contains
-[a-z0-9-], so generated content can never write outside its own article
-folder or into something like a CI workflow file.
-
-Also owns the on-page SEO a static-HTML publisher has to do by hand:
-meta description, Open Graph tags, JSON-LD article markup, an FTC
-affiliate disclosure, and a sitemap.xml + robots.txt so search engines
-have something to crawl from. None of this guarantees ranking — a brand
-new site with no backlinks is going to be slow to get noticed regardless
-— but skipping it makes indexing slower still for no reason.
 """
+Publish a generated site straight to GitHub Pages using the GitHub REST API.
 
+No git, no terminal, no file manager. This is what makes the whole thing
+usable from a phone.
+
+Required environment variables:
+  GITHUB_TOKEN     fine-grained token, Contents: Read and write, THIS REPO ONLY
+  GITHUB_USERNAME  your github username
+  GITHUB_REPO      the repo name that serves your site
+
+Repo setup (one time, from the GitHub mobile site):
+  1. Create a PUBLIC repo
+  2. Settings > Pages > Source: Deploy from a branch
+  3. Branch: main, Folder: /docs
+"""
 import base64
 import json
+import os
 import re
+from pathlib import Path
 
 import requests
 
-from config import settings
-from core import database as db, images
-from core.security import safe_slug, sanitize_html
-
-API_ROOT = "https://api.github.com"
-TIMEOUT = 30
-DISCLOSURE = (
-    "Disclosure: this site may earn a commission from links on this page, "
-    "at no extra cost to you."
-)
+API = "https://api.github.com"
+TIMEOUT = 20
 
 
-class PublishError(Exception):
-    pass
+def _cfg():
+    from core.db import get_secret
+    return (get_secret("GITHUB_TOKEN"), get_secret("GITHUB_USERNAME"),
+            get_secret("GITHUB_REPO"))
 
 
 def is_configured() -> bool:
-    return bool(settings.GITHUB_TOKEN and settings.GITHUB_USERNAME and settings.GITHUB_REPO)
+    token, user, repo = _cfg()
+    return bool(token and user and repo)
 
 
-def site_url():
-    """Absolute base URL for the live site, with a trailing slash.
-
-    Explicit SITE_BASE_URL wins (any host), then CUSTOM_DOMAIN, then the
-    default github.io project URL.
-    """
-    if settings.SITE_BASE_URL:
-        return settings.SITE_BASE_URL.rstrip("/") + "/"
-    if settings.CUSTOM_DOMAIN:
-        return f"https://{settings.CUSTOM_DOMAIN.strip().strip('/')}/"
-    if not settings.GITHUB_USERNAME or not settings.GITHUB_REPO:
-        return None
-    return f"https://{settings.GITHUB_USERNAME}.github.io/{settings.GITHUB_REPO}/"
-
-
-def _head_extras() -> str:
-    """Analytics + search-console verification, injected into every page."""
-    parts = []
-    if settings.SEARCH_CONSOLE_VERIFICATION:
-        parts.append(
-            f'<meta name="google-site-verification" '
-            f'content="{_escape(settings.SEARCH_CONSOLE_VERIFICATION)}">'
-        )
-    if settings.ANALYTICS_SNIPPET:
-        parts.append(settings.ANALYTICS_SNIPPET)
-    return "\n".join(parts)
-
-
-def _headers():
+def _headers(token: str):
     return {
-        "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
-def _contents_url(path: str) -> str:
-    return f"{API_ROOT}/repos/{settings.GITHUB_USERNAME}/{settings.GITHUB_REPO}/contents/{path}"
+def _safe_slug(text: str) -> str:
+    """Allowlist-only slug: only [a-z0-9-] survive. This is the entire
+    defense against a slug escaping the docs/<slug>/ prefix it's built into
+    — a bot- or LLM-chosen title like "../../.github/workflows/evil" must
+    never reach the GitHub API path unsanitized, since that path can write
+    a workflow file that runs with the repo's own secrets. A denylist on
+    ".." alone (what some call sites here used to do) misses this case:
+    every character survives it, only the literal substring is blocked."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", (text or "").lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug or "untitled"
 
 
-def _get_file(path: str):
-    resp = requests.get(
-        _contents_url(path),
-        headers=_headers(),
-        params={"ref": settings.GITHUB_BRANCH},
-        timeout=TIMEOUT,
-    )
-    if resp.status_code == 200:
-        return resp.json()
-    return None
+def _put_file(token: str, user: str, repo: str, repo_path: str, content_bytes: bytes, message: str):
+    url = f"{API}/repos/{user}/{repo}/contents/{repo_path}"
+    headers = _headers(token)
 
+    sha = None
+    try:
+        existing = requests.get(url, headers=headers, timeout=TIMEOUT)
+        if existing.status_code == 200:
+            sha = existing.json().get("sha")
+    except Exception:
+        pass
 
-def _put_file(path: str, content_str: str, message: str):
-    existing = _get_file(path)
     payload = {
         "message": message,
-        "content": base64.b64encode(content_str.encode("utf-8")).decode("ascii"),
-        "branch": settings.GITHUB_BRANCH,
+        "content": base64.b64encode(content_bytes).decode("ascii"),
     }
-    if existing:
-        payload["sha"] = existing["sha"]
-    resp = requests.put(_contents_url(path), headers=_headers(), json=payload, timeout=TIMEOUT)
-    if resp.status_code not in (200, 201):
-        raise PublishError(f"GitHub publish failed ({resp.status_code}): {resp.text[:300]}")
-    return resp.json()
+    if sha:
+        payload["sha"] = sha
+
+    r = requests.put(url, headers=headers, json=payload, timeout=TIMEOUT)
+    if r.status_code in (401, 403):
+        # Fine-grained tokens expire after 90 days. Say so plainly rather than
+        # letting publishing quietly stop working.
+        raise RuntimeError(
+            "GitHub refused the token. It has probably expired (fine-grained "
+            "tokens last 90 days) or lost Contents: Read and write. "
+            "Make a new one and paste it into Setup.")
+    if r.status_code == 409:
+        raise RuntimeError("GitHub had a conflicting write. Try publishing again.")
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub rejected {repo_path}: {r.status_code} {r.text[:200]}")
+    return True
 
 
-def put_text_file(path: str, content_str: str, message: str):
-    """Public wrapper for callers outside this module (e.g. IndexNow's key
-    file) that need to publish an arbitrary text file to the site repo."""
-    return _put_file(path, content_str, message)
-
-
-def _put_binary_file(path: str, data: bytes, message: str):
-    existing = _get_file(path)
-    payload = {
-        "message": message,
-        "content": base64.b64encode(data).decode("ascii"),
-        "branch": settings.GITHUB_BRANCH,
-    }
-    if existing:
-        payload["sha"] = existing["sha"]
-    resp = requests.put(_contents_url(path), headers=_headers(), json=payload, timeout=TIMEOUT)
-    if resp.status_code not in (200, 201):
-        raise PublishError(f"GitHub image upload failed ({resp.status_code}): {resp.text[:300]}")
-    return resp.json()
-
-
-def _escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _meta_description(body_html: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", body_html)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > 155:
-        text = text[:152].rsplit(" ", 1)[0] + "..."
-    return text
-
-
-def _mark_sponsored_links(body_html: str, affiliate_urls: set) -> str:
-    """Force rel="sponsored nofollow noopener" onto any link that points
-    at one of our own affiliate URLs, regardless of whether the LLM
-    included it — this is required by Google's link-attribution
-    guidelines for paid/affiliate links and shouldn't depend on the model
-    remembering to add it."""
-    if not affiliate_urls:
-        return body_html
-
-    def repl(match):
-        tag = match.group(0)
-        href_match = re.search(r'href="([^"]*)"', tag)
-        if not href_match or href_match.group(1) not in affiliate_urls:
-            return tag
-        tag = re.sub(r'\s+rel="[^"]*"', "", tag)
-        return tag[:-1] + ' rel="sponsored nofollow noopener">'
-
-    return re.sub(r"<a\b[^>]*>", repl, body_html)
-
-
-ARTICLE_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<meta name="description" content="{description}">
-<link rel="canonical" href="{canonical}">
-<meta property="og:type" content="article">
-<meta property="og:title" content="{title}">
-<meta property="og:description" content="{description}">
-<meta property="og:url" content="{canonical}">
-{og_image}
-<script type="application/ld+json">
-{{"@context":"https://schema.org","@type":"Article","headline":{title_json},"description":{description_json},"url":{canonical_json}{image_json_field}}}
-</script>
-{faq_json_ld}
-{head_extras}
-</head>
-<body>
-<article>
-<h1>{title}</h1>
-<p><em>{disclosure}</em></p>
-{figure}
-{body}
-{faq}
-</article>
-{related}
-<p><a href="../index.html">&larr; Back to home</a></p>
-</body>
-</html>
-"""
-
-INDEX_HEADER_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Articles</title>
-{head_extras}
-</head>
-<body>
-<h1>Articles</h1>
-<ul id="article-list">
-"""
-INDEX_FOOTER = """</ul>
-</body>
-</html>
-"""
-
-ABOUT_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>About</title>
-</head>
-<body>
-<h1>About this site</h1>
-<p>Articles here are researched and drafted with the help of an AI
-writing assistant, working from real web research, and published
-automatically. {disclosure}</p>
-</body>
-</html>
-"""
-
-ROBOTS_TEMPLATE = """User-agent: *
-Allow: /
-
-Sitemap: {sitemap_url}
-"""
-
-
-def _json_string(text: str) -> str:
-    return json.dumps(text)
-
-
-def _get_existing_index_items(index_path: str) -> list:
-    existing = _get_file(index_path)
-    if not existing:
-        return []
-    content = base64.b64decode(existing["content"]).decode("utf-8", errors="ignore")
-    return [line + "\n" for line in content.splitlines() if "<li>" in line]
-
-
-def _update_index(folder: str, title: str, slug: str):
-    index_path = f"{folder}/index.html"
-    items = _get_existing_index_items(index_path)
-    # Match on the href, not the whole line: a re-publish under the same
-    # slug with a changed title would otherwise fail the exact-line check
-    # and add a second, stale entry pointing at the same page instead of
-    # replacing the old one.
-    href_marker = f'href="articles/{slug}.html"'
-    items = [line for line in items if href_marker not in line]
-    entry = f'  <li><a href="articles/{slug}.html">{_escape(title)}</a></li>\n'
-    items.insert(0, entry)
-    header = INDEX_HEADER_TEMPLATE.format(head_extras=_head_extras())
-    html = header + "".join(items) + INDEX_FOOTER
-    _put_file(index_path, html, message=f"Update index: {title}")
-
-
-def _update_sitemap(folder: str):
-    base = site_url()
-    if not base:
-        return
-    urls = [base] + [
-        f"{base}articles/{a['slug']}.html" for a in db.list_articles()
-    ]
-    body = "".join(f"  <url><loc>{_escape(u)}</loc></url>\n" for u in urls)
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        f"{body}"
-        "</urlset>\n"
-    )
-    _put_file(f"{folder}/sitemap.xml", xml, message="Update sitemap.xml")
-
-
-def _ensure_robots_txt(folder: str):
-    path = f"{folder}/robots.txt"
-    if _get_file(path):
-        return
-    base = site_url()
-    content = ROBOTS_TEMPLATE.format(sitemap_url=f"{base}sitemap.xml" if base else "")
-    _put_file(path, content, message="Add robots.txt")
-
-
-def _ensure_cname(folder: str):
-    """GitHub Pages reads the custom domain from a CNAME file at the served
-    root. Written once; skipped if it already holds the right domain."""
-    if not settings.CUSTOM_DOMAIN:
-        return
-    domain = settings.CUSTOM_DOMAIN.strip().strip("/")
-    path = f"{folder}/CNAME"
-    existing = _get_file(path)
-    if existing:
-        current = base64.b64decode(existing["content"]).decode("utf-8", errors="ignore").strip()
-        if current == domain:
-            return
-    _put_file(path, domain + "\n", message=f"Set custom domain: {domain}")
-
-
-def _ensure_about_page(folder: str):
-    path = f"{folder}/about.html"
-    if _get_file(path):
-        return
-    content = ABOUT_TEMPLATE.format(disclosure=DISCLOSURE)
-    _put_file(path, content, message="Add about page")
-
-
-STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "for", "to", "of", "in", "on",
-    "at", "by", "with", "from", "is", "are", "was", "be", "how", "what",
-    "why", "when", "your", "you", "it", "this", "that", "best", "vs",
-}
-
-
-def _keywords(text: str) -> set:
-    return {
-        w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(w) > 2 and w not in STOPWORDS
-    }
-
-
-def _related_articles(title: str, exclude_slug: str, limit: int = 3) -> list:
-    """Pick already-published articles sharing the most keywords with this
-    one. Internal links give crawlers more paths into the site, spread
-    authority between pages, and keep a reader who landed on one article
-    moving to the next."""
-    target = _keywords(title)
-    if not target:
-        return []
-    scored = []
-    for article in db.list_articles():
-        if article["slug"] == exclude_slug:
-            continue
-        overlap = len(target & _keywords(article["title"]))
-        if overlap:
-            scored.append((overlap, article))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [article for _, article in scored[:limit]]
-
-
-def _render_related(related: list) -> str:
-    if not related:
-        return ""
-    items = "".join(
-        f'  <li><a href="{_escape(a["slug"])}.html">{_escape(a["title"])}</a></li>\n'
-        for a in related
-    )
-    return f"<aside>\n<h2>Related</h2>\n<ul>\n{items}</ul>\n</aside>"
-
-
-def _publish_image(folder: str, slug: str, image: dict):
-    """Download the chosen image and republish it alongside the article.
-    Returns the rendered <figure> and the image's absolute URL, or
-    ("", None) if anything goes wrong — an article without an image is
-    fine, a failed publish is not."""
-    downloaded = images.download_image(image["url"])
-    if not downloaded:
-        return "", None
-    data, extension = downloaded
-    image_path = f"{folder}/images/{slug}{extension}"
-    _put_binary_file(image_path, data, message=f"Add image for {slug}")
-
-    base = site_url()
-    absolute_url = f"{base}images/{slug}{extension}" if base else None
-
-    # CC licenses require attribution — Openverse hands us the exact string.
-    attribution = image.get("attribution") or (
-        f'"{image["title"]}" by {image["creator"]} '
-        f'is licensed under CC {image["license"]} {image["license_version"]}.'
-    )
-    credit = _escape(attribution)
-    if image.get("source_url"):
-        credit = f'<a href="{_escape(image["source_url"])}" rel="nofollow noopener">{credit}</a>'
-
-    figure = (
-        f'<figure>\n'
-        f'<img src="../images/{slug}{extension}" alt="{_escape(image["title"])}" loading="lazy">\n'
-        f'<figcaption>{credit}</figcaption>\n'
-        f'</figure>'
-    )
-    return figure, absolute_url
-
-
-def _render_faq(faq: list) -> str:
-    if not faq:
-        return ""
-    blocks = "".join(
-        f"<h3>{_escape(entry['question'])}</h3>\n<p>{_escape(entry['answer'])}</p>\n"
-        for entry in faq
-    )
-    return f"<section>\n<h2>Frequently asked questions</h2>\n{blocks}</section>"
-
-
-def _faq_json_ld(faq: list) -> str:
-    """FAQPage markup. The same Q&A is rendered visibly on the page above —
-    structured data describing content a visitor can't see is a structured
-    data policy violation."""
-    if not faq:
-        return ""
-    payload = {
-        "@context": "https://schema.org",
-        "@type": "FAQPage",
-        "mainEntity": [
-            {
-                "@type": "Question",
-                "name": entry["question"],
-                "acceptedAnswer": {"@type": "Answer", "text": entry["answer"]},
-            }
-            for entry in faq
-        ],
-    }
-    return (
-        '<script type="application/ld+json">\n'
-        f"{json.dumps(payload)}\n"
-        "</script>"
-    )
-
-
-def _unique_slug(base_slug: str) -> str:
-    """Disambiguate a slug against already-published articles so two
-    different titles that happen to truncate/sanitize to the same slug
-    don't silently overwrite each other's page on the live site."""
-    existing = {a["slug"] for a in db.list_articles()}
-    if base_slug not in existing:
-        return base_slug
-    n = 2
-    while f"{base_slug}-{n}" in existing:
-        n += 1
-    return f"{base_slug}-{n}"
-
-
-def publish_article(
-    bot_name: str,
-    title: str,
-    body_html: str,
-    affiliate_urls: set = None,
-    faq: list = None,
-    image: dict = None,
-) -> dict:
-    if not is_configured():
-        raise PublishError(
-            "Publishing isn't set up yet — GITHUB_TOKEN/GITHUB_USERNAME/GITHUB_REPO missing."
+def publish_site_folder(site_dir: str, slug: str = "") -> str:
+    """
+    Upload every .html/.xml/.txt/.css file in a site folder to docs/<slug>/.
+    Returns the live URL.
+    """
+    token, user, repo = _cfg()
+    if not (token and user and repo):
+        raise RuntimeError(
+            "GitHub publishing is not configured. Set GITHUB_TOKEN, "
+            "GITHUB_USERNAME and GITHUB_REPO."
         )
 
-    folder = settings.GITHUB_PAGES_FOLDER.strip("/")
-    slug = _unique_slug(safe_slug(title)[:80])
-    clean_body = sanitize_html(body_html)
-    clean_body = _mark_sponsored_links(clean_body, affiliate_urls or set())
-    faq = faq or []
+    folder = Path(site_dir)
+    if not folder.is_dir():
+        raise RuntimeError(f"Not a folder: {site_dir}")
 
-    figure, image_url = ("", None)
-    if image:
+    slug = _safe_slug(slug or folder.name)
+    allowed = {".html", ".xml", ".txt", ".css", ".md"}
+    # Owner-facing kit files stay local; they are not part of the website.
+    skip = {"pages.json", ".published.json"}
+
+    # Only send what changed. A 50-page site was 50 API writes and 50 commits
+    # on every publish, which GitHub throttles. A local manifest of content
+    # hashes means a normal publish sends one new page and the index.
+    import hashlib
+    manifest_file = folder / ".published.json"
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    uploaded, skipped = 0, 0
+    seen = set()
+    for f in sorted(folder.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in allowed or f.name in skip:
+            continue
+        data = f.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        seen.add(f.name)
+        if manifest.get(f.name) == digest:
+            skipped += 1
+            continue
+        _put_file(token, user, repo, f"docs/{slug}/{f.name}", data,
+                  f"Publish {slug}/{f.name}")
+        manifest[f.name] = digest
+        uploaded += 1
+
+    # Anything gone locally (a rejected page) is deleted from the live site.
+    for name in [n for n in manifest if n not in seen]:
         try:
-            figure, image_url = _publish_image(folder, slug, image)
+            unpublish_page(slug, name[:-5] if name.endswith(".html") else name)
         except Exception:
-            figure, image_url = ("", None)
+            pass
+        manifest.pop(name, None)
 
-    canonical = f"{site_url()}articles/{slug}.html" if site_url() else ""
-    description = _meta_description(clean_body)
-    html = ARTICLE_TEMPLATE.format(
-        title=_escape(title),
-        description=_escape(description),
-        canonical=canonical,
-        title_json=_json_string(title),
-        description_json=_json_string(description),
-        canonical_json=_json_string(canonical),
-        image_json_field=f",\"image\":{_json_string(image_url)}" if image_url else "",
-        og_image=(
-            f'<meta property="og:image" content="{_escape(image_url)}">' if image_url else ""
-        ),
-        faq_json_ld=_faq_json_ld(faq),
-        disclosure=DISCLOSURE,
-        head_extras=_head_extras(),
-        figure=figure,
-        body=clean_body,
-        faq=_render_faq(faq),
-        related=_render_related(_related_articles(title, slug)),
+    try:
+        manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    except Exception:
+        pass
+
+    if uploaded == 0 and skipped == 0:
+        raise RuntimeError("No publishable files found in that folder")
+
+    return f"https://{user}.github.io/{repo}/{slug}/"
+
+
+def publish_article_file(md_path: str, slug: str = "") -> str:
+    """Turn a single markdown article into an HTML page and publish it."""
+    from core.safe_html import escape_text, paragraphs
+
+    token, user, repo = _cfg()
+    if not (token and user and repo):
+        raise RuntimeError("GitHub publishing is not configured.")
+
+    p = Path(md_path)
+    if not p.is_file():
+        raise RuntimeError(f"Not a file: {md_path}")
+
+    raw = p.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    title = lines[0].lstrip("# ").strip() if lines else p.stem
+    body = "\n".join(lines[1:]).strip()
+
+    slug = _safe_slug(slug or p.stem)
+    html_doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{escape_text(title)}</title>
+  <meta name="description" content="{escape_text(title[:150])}">
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; line-height: 1.6; }}
+    footer {{ margin-top: 40px; font-size: 0.9em; color: #666; }}
+  </style>
+</head>
+<body>
+  <h1>{escape_text(title)}</h1>
+  {paragraphs(body)}
+  <footer><p>Some links may be affiliate links.</p></footer>
+</body>
+</html>
+"""
+    _put_file(token, user, repo, f"docs/{slug}/index.html",
+              html_doc.encode("utf-8"), f"Publish article {slug}")
+    return f"https://{user}.github.io/{repo}/{slug}/"
+
+
+def create_site_repo(name: str = "mysite") -> dict:
+    """
+    Create the public site repo and switch GitHub Pages on, from the app.
+
+    This replaces the fiddliest part of setup: making a repo, finding Settings,
+    finding Pages, and picking main + /docs on a phone browser.
+
+    The token needs 'Administration: Read and write' as well as Contents for
+    this. If it does not have that, we say so and fall back to the manual path.
+    """
+    from core.db import get_secret, set_secret
+    token = get_secret("GITHUB_TOKEN")
+    if not token:
+        return {"ok": False, "detail": "Paste your GitHub token first."}
+
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "mysite")).strip("-") or "mysite"
+    h = _headers(token)
+
+    who = requests.get(f"{API}/user", headers=h, timeout=TIMEOUT)
+    if who.status_code != 200:
+        return {"ok": False, "detail": "Token rejected by GitHub. Check you copied all of it."}
+    user = who.json().get("login", "")
+    set_secret("GITHUB_USERNAME", user)
+
+    exists = requests.get(f"{API}/repos/{user}/{name}", headers=h, timeout=TIMEOUT)
+    if exists.status_code != 200:
+        made = requests.post(
+            f"{API}/user/repos", headers=h,
+            json={"name": name, "private": False, "auto_init": True,
+                  "description": "Published by Revenue Bots"},
+            timeout=TIMEOUT)
+        if made.status_code not in (200, 201):
+            return {"ok": False,
+                    "detail": "Could not create the repo. Your token likely lacks "
+                              "'Administration: Read and write'. Create the repo by "
+                              "hand and type its name below instead."}
+
+    set_secret("GITHUB_REPO", name)
+
+    # Pages needs something in docs/ before it will build.
+    try:
+        _put_file(token, user, name, "docs/index.html",
+                  b"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                  b"<title>Coming soon</title></head><body>"
+                  b"<p>This site is being set up.</p></body></html>",
+                  "Initialise site")
+    except Exception:
+        pass
+
+    pages = requests.post(
+        f"{API}/repos/{user}/{name}/pages", headers=h,
+        json={"source": {"branch": "main", "path": "/docs"}}, timeout=TIMEOUT)
+    if pages.status_code in (201, 204):
+        state = "Pages enabled"
+    elif pages.status_code == 409:
+        state = "Pages already on"
+    else:
+        state = ("repo ready, but turn Pages on by hand: Settings > Pages > "
+                 "main + /docs")
+
+    return {"ok": True, "user": user, "repo": name, "detail": state,
+            "url": f"https://{user}.github.io/{name}/"}
+
+
+def check_connection() -> dict:
+    """Used by the health panel."""
+    token, user, repo = _cfg()
+    if not (token and user and repo):
+        return {"ok": False, "detail": "Missing GITHUB_TOKEN / GITHUB_USERNAME / GITHUB_REPO"}
+    try:
+        r = requests.get(f"{API}/repos/{user}/{repo}", headers=_headers(token), timeout=TIMEOUT)
+        if r.status_code == 200:
+            return {"ok": True, "detail": f"Connected to {user}/{repo}"}
+        if r.status_code == 404:
+            return {"ok": False, "detail": "Repo not found, or the token cannot see it"}
+        if r.status_code in (401, 403):
+            return {"ok": False, "detail": "Token rejected. Check it has Contents: Read and write"}
+        return {"ok": False, "detail": f"GitHub returned {r.status_code}"}
+    except Exception as e:
+        return {"ok": False, "detail": f"Could not reach GitHub: {e}"}
+
+def unpublish_page(site_slug: str, page_slug: str) -> int:
+    """
+    Remove ONE page from a published site.
+
+    The old takedown passed the site folder to unpublish(), which deleted every
+    page that bot had ever written. Taking down one bad article should not
+    destroy the rest of the site.
+    """
+    token, user, repo = _cfg()
+    if not (token and user and repo):
+        raise RuntimeError("GitHub publishing is not configured.")
+    if not (site_slug or "").strip() or not (page_slug or "").strip():
+        raise RuntimeError("Bad slug")
+    site_slug = _safe_slug(site_slug)
+    page_slug = _safe_slug(page_slug)
+
+    path = f"docs/{site_slug}/{page_slug}.html"
+    r = requests.get(f"{API}/repos/{user}/{repo}/contents/{path}",
+                     headers=_headers(token), timeout=TIMEOUT)
+    if r.status_code == 404:
+        return 0
+    if r.status_code != 200:
+        raise RuntimeError(f"Could not find {path}: {r.status_code}")
+    sha = r.json().get("sha")
+    d = requests.delete(f"{API}/repos/{user}/{repo}/contents/{path}",
+                        headers=_headers(token),
+                        json={"message": f"Take down {path}", "sha": sha},
+                        timeout=TIMEOUT)
+    return 1 if d.status_code in (200, 201) else 0
+
+
+def unpublish(slug: str) -> int:
+    """
+    Delete a published folder from the site. Used by autopilot take-downs.
+    Returns how many files were removed.
+    """
+    token, user, repo = _cfg()
+    if not (token and user and repo):
+        raise RuntimeError("GitHub publishing is not configured.")
+
+    if not (slug or "").strip():
+        raise RuntimeError("Bad slug")
+    slug = _safe_slug(slug)
+
+    listing = requests.get(
+        f"{API}/repos/{user}/{repo}/contents/docs/{slug}",
+        headers=_headers(token), timeout=TIMEOUT,
     )
-    article_path = f"{folder}/articles/{slug}.html"
+    if listing.status_code == 404:
+        return 0
+    if listing.status_code != 200:
+        raise RuntimeError(f"Could not list docs/{slug}: {listing.status_code}")
 
-    _put_file(article_path, html, message=f"Publish: {title} ({bot_name})")
-    _update_index(folder, title, slug)
-    _update_sitemap(folder)
-    _ensure_robots_txt(folder)
-    _ensure_about_page(folder)
-    _ensure_cname(folder)
-
-    return {"slug": slug, "path": article_path, "url": canonical or None}
+    removed = 0
+    for entry in listing.json():
+        if entry.get("type") != "file":
+            continue
+        r = requests.delete(
+            f"{API}/repos/{user}/{repo}/contents/{entry['path']}",
+            headers=_headers(token),
+            json={"message": f"Take down {entry['path']}", "sha": entry["sha"]},
+            timeout=TIMEOUT,
+        )
+        if r.status_code in (200, 201):
+            removed += 1
+    return removed

@@ -1,138 +1,261 @@
-"""Orchestrates one worker tick: heartbeat, then a decide-and-act cycle for
-every started bot, gated by Auto Mode.
-
-Auto Mode gates the whole loop; each bot's own started/stopped status
-gates whether that bot runs. Both are required for anything to publish.
 """
+Owner controls and the selection cycle.
 
-import json
+Selection here acts on real signals — your verdicts, the critic's verdicts and
+actual revenue — and offspring inherit a mutated copy of the parent's writing
+genome. The old build ranked clones on how many files they had written, which
+selected for nothing.
+"""
+import random
+from datetime import datetime, timedelta
 
-from config import settings
-from core import (
-    accounts, content, database as db, images, indexnow, keywords, publisher, tools,
+from config.settings import (
+    COPIES_PER_PARENT, DEFAULT_OBJECTIVE, GUARDRAILS, MAX_BOTS,
+    RANKING_CYCLE_DAYS, STARTING_BOTS,
 )
-from core.security import redact_secrets
+from core import db, fitness, genome
 
 
-def get_health() -> dict:
-    age = db.get_heartbeat_age_seconds()
-    alive = age is not None and age < settings.HEARTBEAT_STALE_MINUTES * 60
-    return {"alive": alive, "age_seconds": age}
+SMALL_IMMIGRATION = 0.12
 
 
-def _configured_secrets() -> list:
-    return [
-        s
-        for s in [
-            settings.GROQ_API_KEY,
-            settings.GOOGLE_API_KEY,
-            settings.OPENROUTER_API_KEY,
-            settings.GITHUB_TOKEN,
-            settings.DASHBOARD_PASSWORD,
-        ]
-        if s
-    ]
+class Controller:
 
+    # ------------------------------------------------ basic controls
 
-def _do_publish(bot: dict, decision: dict):
-    topic = decision.get("topic") or bot["niche"]
+    def start(self, bot_id):
+        db.update_bot(bot_id, status="running")
+        db.log(bot_id, "started", "by owner")
 
-    research_notes = []
-    for result in tools.search_web(f"{topic} {bot['niche']}", max_results=3):
-        try:
-            research_notes.append(tools.fetch_url(result["url"]))
-        except Exception:
-            continue
+    def pause(self, bot_id):
+        db.update_bot(bot_id, status="paused")
+        db.log(bot_id, "paused", "by owner")
 
-    active_links = db.list_active_affiliate_links(bot["id"])
-    article = content.generate_article(
-        bot, topic, research_notes, active_links, _configured_secrets()
-    )
-    affiliate_urls = {link["affiliate_url"] for link in active_links}
+    def stop(self, bot_id):
+        db.update_bot(bot_id, status="stopped")
+        db.log(bot_id, "stopped", "by owner")
 
-    image = None
-    if settings.ENABLE_ARTICLE_IMAGES:
-        try:
-            image = images.find_image(topic)
-        except Exception:
-            image = None
+    def start_all(self):
+        bots = db.get_bots()
+        for b in bots:
+            self.start(b["id"])
+        return len(bots)
 
-    result = publisher.publish_article(
-        bot["name"],
-        article["title"],
-        article["body_html"],
-        affiliate_urls,
-        faq=article.get("faq"),
-        image=image,
-    )
+    def pause_all(self):
+        bots = db.get_bots()
+        for b in bots:
+            self.pause(b["id"])
+        return len(bots)
 
-    db.add_article(bot["id"], article["title"], result["slug"], result["path"], result["url"])
-    db.record_publish(bot["id"])
-    db.log_activity(
-        bot["id"], "published", json.dumps({"title": article["title"], "url": result["url"]})
-    )
+    def stop_all(self):
+        bots = db.get_bots()
+        for b in bots:
+            self.stop(b["id"])
+        return len(bots)
 
-    if result["url"]:
-        try:
-            indexnow.ensure_key_file_published()
-            indexnow.submit_url(result["url"])
-        except Exception:
-            # The article is already published and logged at this point —
-            # a hiccup pushing the IndexNow key file shouldn't count as a
-            # failed cycle and trip the failure-backoff counter.
-            pass
+    def set_niche(self, bot_id, niche):
+        niche = (niche or "").strip()
+        db.update_bot(bot_id, niche=niche)
+        bot = db.get_bot(bot_id)
+        g = genome.load(bot.get("genome") or "")
+        g["niche"] = niche
+        db.update_bot(bot_id, genome=genome.dump(g))
+        db.log(bot_id, "niche_set", niche)
 
+    def set_objective(self, bot_id, objective):
+        db.update_bot(bot_id, objective=objective)
+        db.log(bot_id, "objective_set", objective[:200])
 
-def run_cycle(bot: dict):
-    recent_failures = db.count_recent_failures(bot["id"], settings.FAILURE_WINDOW_MINUTES)
-    if recent_failures >= settings.FAILURE_THRESHOLD:
-        db.log_activity(
-            bot["id"],
-            "execution_skipped",
-            f"Backing off after {recent_failures} failures in "
-            f"{settings.FAILURE_WINDOW_MINUTES}m",
-        )
-        return
+    def order(self, bot_id, text):
+        """Orders are read by the bot at the top of its next prompt."""
+        db.set_order(bot_id, text)
+        db.log(bot_id, "order", text[:200])
 
-    # Check the publish cap before spending an LLM call on a decision.
-    # At the default 4-minute loop interval a bot ticks ~15x/hour against
-    # a cap of 4 publishes/hour, so without this a capped bot would still
-    # burn a decision call (and usually get "publish_article" back) on
-    # every tick for the rest of the hour, for nothing.
-    if db.count_recent_publishes(bot["id"], window_minutes=60) >= settings.MAX_PUBLISHES_PER_HOUR:
-        db.log_activity(bot["id"], "execution_skipped", "Hourly publish cap reached")
-        return
+    def order_all(self, text):
+        bots = db.get_bots()
+        for b in bots:
+            self.order(b["id"], text)
+        return len(bots)
 
-    recent_activity = db.get_recent_activity(bot_id=bot["id"], limit=10)
-    suggested_queries = keywords.suggest_queries(bot["niche"])
-    decision = content.decide_action(bot, recent_activity, suggested_queries)
-    db.log_activity(bot["id"], "decision", json.dumps(decision))
+    def guardrails(self):
+        return db.get_setting("guardrails", GUARDRAILS)
 
-    action = decision.get("action")
-    if action == "idle":
-        return
-    if action == "discover_affiliate":
-        accounts.run_discovery_for_bot(bot)
-        return
-    if action in ("publish_article", "retry_failed"):
-        # retry_failed doesn't yet vary its approach from a fresh publish.
-        _do_publish(bot, decision)
+    def add_guardrail(self, rule):
+        rules = self.guardrails()
+        if rule not in rules:
+            rules.append(rule)
+            db.set_setting("guardrails", rules)
+        return rules
 
+    # ------------------------------------------------ population
 
-def run_worker_tick():
-    db.record_heartbeat()
-
-    if db.get_setting("auto_mode", "false") != "true":
-        return
-
-    for bot in db.get_bots(status="started"):
-        try:
-            run_cycle(bot)
-        except Exception as exc:
-            db.record_failure(bot["id"])
-            # Exception text can carry request details (a failed HTTP call's
-            # URL, a truncated response body); redact before it lands in the
-            # activity log the dashboard displays.
-            db.log_activity(
-                bot["id"], "execution_failed", redact_secrets(str(exc), _configured_secrets())
+    def seed(self):
+        if db.get_bots():
+            return
+        for i in range(STARTING_BOTS):
+            g = genome.new_genome("")
+            db.create_bot(
+                name=f"Bot-{i + 1}",
+                objective=DEFAULT_OBJECTIVE,
+                genome=genome.dump(g),
             )
+
+    def ranking_due(self):
+        last = db.get_setting("last_ranking")
+        if not last:
+            db.set_setting("last_ranking", datetime.utcnow().isoformat())
+            return False
+        try:
+            last_dt = datetime.fromisoformat(str(last))
+        except Exception:
+            return True
+        return datetime.utcnow() >= last_dt + timedelta(days=RANKING_CYCLE_DAYS)
+
+    def next_deadline(self):
+        last = db.get_setting("last_ranking")
+        if not last:
+            return "after the first full cycle"
+        try:
+            return (datetime.fromisoformat(str(last))
+                    + timedelta(days=RANKING_CYCLE_DAYS)).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return "unknown"
+
+    def maybe_rank(self):
+        if not self.ranking_due():
+            return None
+        return self.run_selection()
+
+    def scoreboard(self):
+        """Every living bot with its current score. Used by the dashboard too."""
+        outcomes = db.all_outcomes()
+        recent = db.all_outcomes(since_days=RANKING_CYCLE_DAYS)
+        money = db.earnings_by_bot()
+        rows = []
+        for b in db.get_bots():
+            o = outcomes.get(b["id"], {"published": 0, "rejected": 0, "pending": 0,
+                                       "auto_published": 0, "auto_rejected": 0})
+            m = float(money.get(b["id"], 0.0))
+            r = recent.get(b["id"], {"published": 0, "rejected": 0, "pending": 0,
+                                     "auto_published": 0, "auto_rejected": 0})
+            rows.append({"bot": b, "outcomes": o, "earnings": m, "recent": r,
+                         "score": fitness.score(o, m, r)})
+        rows.sort(key=lambda r: r["score"], reverse=True)
+        return rows
+
+    def run_selection(self):
+        board = self.scoreboard()
+        if not board:
+            return {"message": "No bots alive"}
+
+        db.set_setting("last_ranking", datetime.utcnow().isoformat())
+        scores = [r["score"] for r in board]
+        result = {
+            "when": datetime.utcnow().isoformat(),
+            "standings": [
+                {"name": r["bot"]["name"], "score": round(r["score"], 1),
+                 "published": r["outcomes"]["published"],
+                 "auto_published": r["outcomes"]["auto_published"],
+                 "rejected": r["outcomes"]["rejected"] + r["outcomes"]["auto_rejected"],
+                 "earned": round(r["earnings"], 2)}
+                for r in board
+            ],
+            "removed": [], "bred": [], "notes": [],
+        }
+
+        # ---- cull
+        # Two different rules, because the situations differ.
+        #
+        # Below the cap there is room to grow, so only genuine
+        # underperformers go. Killing someone every cycle regardless of how
+        # well they are doing was the old build's mistake.
+        #
+        # At the cap there is no room, and without turnover the population
+        # freezes forever: nothing is culled, so there is no headroom, so
+        # nothing breeds, so no new genome is ever tried again. So at the cap
+        # the weakest is replaced whenever there is a real spread between best
+        # and worst. If everyone is genuinely equal, nobody moves.
+        at_cap = len(board) >= MAX_BOTS
+        # Elitism: never cull the current leader. Scores are noisy over a
+        # single window, so without this the best genome in the population can
+        # be thrown away on one bad week and never recovered.
+        leader_id = board[0]["bot"]["id"]
+        cullable = [r for r in board
+                    if not fitness.in_grace(r["bot"])
+                    and r["bot"]["id"] != leader_id
+                    and fitness.enough_evidence(r.get("recent"))]
+        if len(board) > 1 and cullable:
+            worst = cullable[-1]
+            best = board[0]["score"]
+            spread = best - worst["score"]
+            forced = at_cap and spread > 1.0 and worst["score"] < best * 0.9
+            if fitness.should_cull(worst["score"], scores) or forced:
+                db.kill_bot(worst["bot"]["id"])
+                db.log(worst["bot"]["id"], "culled", f"score {worst['score']:.1f}")
+                result["removed"].append(
+                    f"{worst['bot']['name']} (score {worst['score']:.1f})")
+            elif at_cap:
+                result["notes"].append(
+                    "At the cap, but no clear underperformer with enough "
+                    "reviewed work to judge fairly — no replacement made.")
+            else:
+                result["notes"].append("Nobody underperformed enough to cull.")
+        elif len(board) > 1:
+            result["notes"].append("All bots still within their 48h grace period.")
+
+        # ---- breed: only from parents whose work was actually accepted
+        alive = len(db.get_bots())
+        headroom = max(0, MAX_BOTS - alive)
+        if headroom <= 0:
+            result["notes"].append(f"At the {MAX_BOTS}-bot cap.")
+            return result
+
+        parents = [r for r in board
+                   if r["bot"].get("status") != "dead"
+                   and fitness.proven(r["outcomes"], r["earnings"])]
+        if not parents:
+            result["notes"].append(
+                "No bot has had work accepted yet, so nothing was copied. "
+                "Publish something, or turn on autopilot.")
+            return result
+
+        for r in parents:
+            if headroom <= 0:
+                break
+            parent = db.get_bot(r["bot"]["id"])
+            if not parent or parent["status"] == "dead":
+                continue
+            pg = genome.load(parent.get("genome") or "")
+            for _ in range(COPIES_PER_PARENT):
+                if headroom <= 0:
+                    break
+                # Diversity. Every bot descends from one ancestor, so copying
+                # parents forever collapses the gene pool and the population
+                # settles on the first decent combination it finds. One new
+                # bot in four gets a fresh random genome instead, which keeps
+                # unexplored trait combinations entering the pool.
+                # Immigration keeps the gene pool from collapsing, but in a
+                # small population too much of it drowns out what selection
+                # has already found. Scale it to the population size.
+                immigration = 0.25 if len(board) >= 4 else SMALL_IMMIGRATION
+                if random.random() < immigration:
+                    child = genome.new_genome(parent.get("niche", ""))
+                    child["generation"] = parent["generation"] + 1
+                    origin = "fresh genome"
+                else:
+                    child = genome.mutate(pg)
+                    origin = genome.summary(child)
+                name = (f"{parent['name'].split('-g')[0]}-g{child['generation']}"
+                        f"-{random.randint(100, 999)}")
+                db.create_bot(
+                    name=name,
+                    objective=parent["objective"],
+                    niche=child.get("niche", ""),
+                    genome=genome.dump(child),
+                    generation=parent["generation"] + 1,
+                    parent_id=parent["id"],
+                )
+                result["bred"].append(f"{name} — {origin}")
+                headroom -= 1
+
+        return result

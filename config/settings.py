@@ -1,92 +1,49 @@
+"""All tunable settings. Environment variables override these at runtime."""
 import os
 
 
-def _env(name, default=None):
-    return os.environ.get(name, default)
+def _int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except Exception:
+        return default
 
 
-# --- LLM providers (checked in this priority order) ---
-GROQ_API_KEY = _env("GROQ_API_KEY")
-GROQ_MODEL = _env("GROQ_MODEL", "llama-3.1-8b-instant")
+# --- population ---
+# Hard cap, never unlimited. This is a measured tradeoff, not a guess:
+# at 3 bots roughly one new genome is tried per ranking cycle, so selection is
+# slow and noisy (the elite landed between 68% and 97% of optimum across test
+# seeds). At 6 it converges faster and higher. Raise it ONLY if you give each
+# bot a distinct niche — several near-identical sites on one domain is the
+# doorway-page pattern search engines penalise.
+MAX_BOTS = _int("MAX_BOTS", 3)
+STARTING_BOTS = 1
+COPIES_PER_PARENT = 1
+RANKING_CYCLE_DAYS = float(os.getenv("RANKING_CYCLE_DAYS", "7"))
 
-GOOGLE_API_KEY = _env("GOOGLE_API_KEY")
-GOOGLE_MODEL = _env("GOOGLE_MODEL", "gemini-1.5-flash")
+# --- worker ---
+WORKER_INTERVAL_SECONDS = _int("WORKER_INTERVAL_SECONDS", 300)
+MAX_PARALLEL_BOTS = _int("MAX_PARALLEL_BOTS", 4)
+MAX_ARTICLES_PER_BOT_PER_HOUR = _int("MAX_ARTICLES_PER_BOT_PER_HOUR", 1)
 
-OPENROUTER_API_KEY = _env("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = _env("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+# Backpressure. Production used to outrun review by roughly 70x, so the queue
+# grew forever. Bots stop writing once this many drafts are already waiting.
+MAX_PENDING_QUEUE = _int("MAX_PENDING_QUEUE", 12)
 
-# --- Publishing target ---
-GITHUB_TOKEN = _env("GITHUB_TOKEN")
-GITHUB_USERNAME = _env("GITHUB_USERNAME")
-GITHUB_REPO = _env("GITHUB_REPO")
-GITHUB_BRANCH = _env("GITHUB_BRANCH", "main")
-GITHUB_PAGES_FOLDER = _env("GITHUB_PAGES_FOLDER", "docs")
+# --- content ---
+MIN_ARTICLE_CHARS = 320
 
-# --- Site identity ---
-# CUSTOM_DOMAIN publishes a CNAME file so GitHub Pages serves from your own
-# domain. SITE_BASE_URL overrides the absolute base used in canonical URLs,
-# sitemap entries, and Open Graph tags — set it when hosting somewhere other
-# than Pages (Netlify/Cloudflare/Vercel). Falls back to the github.io URL.
-CUSTOM_DOMAIN = _env("CUSTOM_DOMAIN")
-SITE_BASE_URL = _env("SITE_BASE_URL")
+DEFAULT_OBJECTIVE = (
+    "Build a small site that earns affiliate revenue by being genuinely more "
+    "useful than the competition. Stay ethical and legal."
+)
 
-# --- Measurement ---
-# ANALYTICS_SNIPPET is raw HTML injected into every page's <head> — use
-# whatever provider you like (Plausible, GA4, Fathom, Cloudflare).
-# SEARCH_CONSOLE_VERIFICATION is just the content value of Google's
-# google-site-verification meta tag.
-ANALYTICS_SNIPPET = _env("ANALYTICS_SNIPPET", "")
-SEARCH_CONSOLE_VERIFICATION = _env("SEARCH_CONSOLE_VERIFICATION", "")
+GUARDRAILS = [
+    "Do not do anything illegal",
+    "No black-hat SEO",
+    "Follow affiliate program rules and disclose affiliate links",
+    "Do not create harmful or deceptive content",
+    "Always obey direct orders from the owner",
+]
 
-# --- Article images ---
-# Sourced from Openverse, filtered to licenses allowing commercial use and
-# modification, downloaded into the site repo, and credited on the page.
-ENABLE_ARTICLE_IMAGES = _env("ENABLE_ARTICLE_IMAGES", "true").lower() == "true"
-
-# --- Crypto trading — places REAL orders with REAL money once
-# trading_enabled is flipped on in the dashboard. See README before
-# touching any of this. CRYPTO_EXCHANGE is any ccxt exchange id
-# (kraken, coinbase, binance, ...) — the API key on that exchange must
-# be trade+read only, NEVER withdrawal-capable.
-CRYPTO_EXCHANGE = _env("CRYPTO_EXCHANGE", "kraken")
-CRYPTO_API_KEY = _env("CRYPTO_API_KEY")
-CRYPTO_API_SECRET = _env("CRYPTO_API_SECRET")
-CRYPTO_QUOTE_CURRENCY = _env("CRYPTO_QUOTE_CURRENCY", "USD")
-CRYPTO_TRADING_PAIRS = _env("CRYPTO_TRADING_PAIRS", "BTC/USD,ETH/USD")
-TRADING_TIMEFRAME = _env("TRADING_TIMEFRAME", "1h")
-
-# Safety limits — review these before enabling. They're deliberately
-# conservative defaults, not a recommendation of how much to risk.
-TRADING_MAX_POSITION_USD = float(_env("TRADING_MAX_POSITION_USD", "25"))
-TRADING_DAILY_LOSS_LIMIT_USD = float(_env("TRADING_DAILY_LOSS_LIMIT_USD", "50"))
-TRADING_MAX_OPEN_POSITIONS = int(_env("TRADING_MAX_OPEN_POSITIONS", "2"))
-TRADING_LOOP_INTERVAL_SECONDS = int(_env("TRADING_LOOP_INTERVAL_SECONDS", "900"))
-
-# TRADING_MODE "poll" (default): worker.py checks prices on a timer, every
-# TRADING_LOOP_INTERVAL_SECONDS. "realtime": a separate process
-# (trading_stream.py) holds a live websocket connection and reacts the
-# instant a new candle closes, on REALTIME_CANDLE_INTERVAL_SECONDS candles
-# it builds from the live price stream. These two modes are mutually
-# exclusive against the same account — worker.py skips its own trading
-# tick entirely when TRADING_MODE=realtime, so the two can never both
-# place orders for the same pairs at once.
-TRADING_MODE = _env("TRADING_MODE", "poll")
-REALTIME_CANDLE_INTERVAL_SECONDS = int(_env("REALTIME_CANDLE_INTERVAL_SECONDS", "60"))
-
-# --- Dashboard ---
-DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
-
-# --- Storage ---
-DB_PATH = _env("DB_PATH", "data/money_bots.db")
-
-# --- Safety limits ---
-# These only engage when a bot is behaving abnormally; raising them
-# doesn't make a healthy bot faster. MAX_PUBLISHES_PER_HOUR defaults low
-# on purpose: search engines' spam systems specifically target high-volume,
-# unedited content from new sites, so a lower steady rate is better for
-# actually getting indexed than a higher one.
-MAX_PUBLISHES_PER_HOUR = int(_env("MAX_PUBLISHES_PER_HOUR", "2"))
-FAILURE_THRESHOLD = int(_env("FAILURE_THRESHOLD", "5"))
-FAILURE_WINDOW_MINUTES = int(_env("FAILURE_WINDOW_MINUTES", "30"))
-HEARTBEAT_STALE_MINUTES = int(_env("HEARTBEAT_STALE_MINUTES", "15"))
-WORKER_LOOP_INTERVAL_SECONDS = int(_env("WORKER_LOOP_INTERVAL_SECONDS", "240"))
+DATABASE_PATH = os.getenv("DB_PATH", "").strip() or "data/bots.db"

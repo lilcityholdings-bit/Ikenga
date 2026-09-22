@@ -1,113 +1,135 @@
-"""Thin LLM abstraction over whichever free-tier provider is configured.
-
-Checked in priority order: Groq, then Google AI Studio, then OpenRouter.
-Free tiers occasionally return malformed JSON in json mode — callers that
-need structured output should use complete_json and always handle its
-`default` fallback rather than assume valid JSON came back.
 """
+Flexible LLM helper with provider failover.
 
-import json
+Changes from the old version:
+  1. Pooled HTTP session instead of a new connection per call.
+  2. Remembers which providers just failed and skips them for 5 minutes,
+     instead of burning 15 seconds on a dead key every single cycle.
+  3. Key presence is read once, not on every call.
+"""
+import os
+import time
+from pathlib import Path
 
 import requests
 
-from config import settings
-
-TIMEOUT = 60
-
-
-class LLMError(Exception):
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except Exception:
     pass
 
+TIMEOUT = 20
+COOLDOWN = 300  # seconds to skip a provider after it fails
 
-def active_provider():
-    if settings.GROQ_API_KEY:
-        return "groq"
-    if settings.GOOGLE_API_KEY:
-        return "google"
-    if settings.OPENROUTER_API_KEY:
-        return "openrouter"
+_session = requests.Session()
+_cooldowns = {}
+
+
+def _key(name: str) -> str:
+    try:
+        from core.db import get_secret
+        return get_secret(name)
+    except Exception:
+        return os.getenv(name, "").strip()
+
+
+def _skip(provider: str) -> bool:
+    until = _cooldowns.get(provider, 0)
+    return time.time() < until
+
+
+def _fail(provider: str):
+    _cooldowns[provider] = time.time() + COOLDOWN
+
+
+def _ok(provider: str):
+    _cooldowns.pop(provider, None)
+
+
+def _try_openai_style(provider, url, key, model, messages, max_tokens):
+    r = _session.post(
+        url,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"model": model, "messages": messages,
+              "max_tokens": max_tokens, "temperature": 0.7},
+        timeout=TIMEOUT,
+    )
+    if r.status_code == 200:
+        _ok(provider)
+        return r.json()["choices"][0]["message"]["content"].strip()
+    # 429 and 5xx mean "come back later"; 401 means the key is wrong.
+    _fail(provider)
     return None
 
 
-def _chat_messages(system, user):
+def call_llm(prompt: str, system: str = "", max_tokens: int = 800) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": user})
-    return messages
+    messages.append({"role": "user", "content": prompt})
 
+    providers = [
+        ("groq", "GROQ_API_KEY",
+         "https://api.groq.com/openai/v1/chat/completions",
+         "llama-3.3-70b-versatile"),
+        ("openrouter", "OPENROUTER_API_KEY",
+         "https://openrouter.ai/api/v1/chat/completions",
+         "meta-llama/llama-3.1-8b-instruct:free"),
+        ("together", "TOGETHER_API_KEY",
+         "https://api.together.xyz/v1/chat/completions",
+         "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"),
+    ]
 
-def _openai_style_complete(url, api_key, model, system, user, json_mode):
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": _chat_messages(system, user),
-        "temperature": 0.7,
-    }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-    resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    for name, env, url, model in providers:
+        key = _key(env)
+        if not key or _skip(name):
+            continue
+        try:
+            out = _try_openai_style(name, url, key, model, messages, max_tokens)
+            if out:
+                return out
+        except Exception:
+            _fail(name)
 
+    gemini = _key("GEMINI_API_KEY")
+    if gemini and not _skip("gemini"):
+        try:
+            full = f"{system}\n\n{prompt}" if system else prompt
+            r = _session.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-1.5-flash:generateContent?key={gemini}",
+                json={"contents": [{"parts": [{"text": full}]}],
+                      "generationConfig": {"maxOutputTokens": max_tokens}},
+                timeout=TIMEOUT,
+            )
+            if r.status_code == 200:
+                _ok("gemini")
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            _fail("gemini")
+        except Exception:
+            _fail("gemini")
 
-def _groq_complete(system, user, json_mode):
-    return _openai_style_complete(
-        "https://api.groq.com/openai/v1/chat/completions",
-        settings.GROQ_API_KEY,
-        settings.GROQ_MODEL,
-        system,
-        user,
-        json_mode,
+    return (
+        "[No LLM key connected yet] Add a free key (GROQ_API_KEY, GEMINI_API_KEY, "
+        "OPENROUTER_API_KEY, or TOGETHER_API_KEY) so the bots can think with real models."
     )
 
 
-def _openrouter_complete(system, user, json_mode):
-    return _openai_style_complete(
-        "https://openrouter.ai/api/v1/chat/completions",
-        settings.OPENROUTER_API_KEY,
-        settings.OPENROUTER_MODEL,
-        system,
-        user,
-        json_mode,
-    )
+def is_llm_available() -> bool:
+    return any(_key(k) for k in
+               ("GROQ_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "TOGETHER_API_KEY"))
 
 
-def _google_complete(system, user, json_mode):
-    # The key goes in a header, never the URL: a URL is what ends up in
-    # exception messages, request logs, and any proxy in between, and
-    # those messages get written straight into the activity log the
-    # dashboard displays.
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GOOGLE_MODEL}:generateContent"
-    headers = {"x-goog-api-key": settings.GOOGLE_API_KEY}
-    prompt = f"{system}\n\n{user}" if system else user
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    if json_mode:
-        payload["generationConfig"] = {"response_mime_type": "application/json"}
-    resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
-
-
-def complete(user: str, system: str = None, json_mode: bool = False) -> str:
-    provider = active_provider()
-    if provider == "groq":
-        return _groq_complete(system, user, json_mode)
-    if provider == "google":
-        return _google_complete(system, user, json_mode)
-    if provider == "openrouter":
-        return _openrouter_complete(system, user, json_mode)
-    raise LLMError(
-        "No LLM API key configured. Set GROQ_API_KEY, GOOGLE_API_KEY, or OPENROUTER_API_KEY."
-    )
-
-
-def complete_json(user: str, system: str = None, default=None):
-    raw = complete(user, system=system, json_mode=True)
-    try:
-        start = raw.index("{")
-        end = raw.rindex("}") + 1
-        return json.loads(raw[start:end])
-    except (ValueError, json.JSONDecodeError):
-        return default
+def provider_status() -> dict:
+    """For the dashboard health panel."""
+    out = {}
+    for name, env in (("groq", "GROQ_API_KEY"), ("openrouter", "OPENROUTER_API_KEY"),
+                      ("gemini", "GEMINI_API_KEY"), ("together", "TOGETHER_API_KEY")):
+        if not _key(env):
+            out[name] = "no key"
+        elif _skip(name):
+            out[name] = f"cooling down {int(_cooldowns[name] - time.time())}s"
+        else:
+            out[name] = "ready"
+    return out
