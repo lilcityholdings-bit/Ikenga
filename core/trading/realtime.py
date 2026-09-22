@@ -197,7 +197,7 @@ async def _handle_signal(exchange, pair: str, candles: list, pairs: list):
         )
 
 
-async def _watch_pair(exchange, pair: str, builder: CandleBuilder, pairs: list):
+async def _watch_pair(exchange, pair: str, builder: CandleBuilder, pairs: list, trade_lock: asyncio.Lock):
     """Runs forever for one pair: blocks on the next price tick, feeds the
     candle builder, and checks for a signal whenever a candle closes.
     Reconnects with backoff on any error rather than dying — a dropped
@@ -228,7 +228,16 @@ async def _watch_pair(exchange, pair: str, builder: CandleBuilder, pairs: list):
             continue
 
         try:
-            await _handle_signal(exchange, pair, builder.candles, pairs)
+            # Every pair runs as its own concurrent task, and _handle_signal
+            # has multiple awaits between checking the open-position cap
+            # and actually placing an order (fetch_ticker, create_order).
+            # Without serializing this, two pairs signaling at the same
+            # moment can both pass the cap check before either has opened
+            # a position — confirmed in testing: 3 pairs, cap of 1,
+            # 3 positions opened. This lock makes each pair's full
+            # decide-and-act sequence atomic relative to every other pair.
+            async with trade_lock:
+                await _handle_signal(exchange, pair, builder.candles, pairs)
         except Exception as exc:
             db.log_trading_activity(
                 "error", f"{pair}: {redact_secrets(str(exc), _configured_secrets())}"
@@ -262,12 +271,16 @@ async def main():
         pair: CandleBuilder(settings.REALTIME_CANDLE_INTERVAL_SECONDS, strategy.LONG_PERIOD * 3)
         for pair in pairs
     }
+    # Shared across every pair's task so a signal on one pair can't
+    # interleave with a signal on another mid-decision — see the comment
+    # in _watch_pair for why this matters.
+    trade_lock = asyncio.Lock()
 
     print(f"Realtime trading stream starting for {pairs} on {settings.CRYPTO_EXCHANGE}...")
     try:
         await asyncio.gather(
             _heartbeat_loop(),
-            *[_watch_pair(exchange, pair, builders[pair], pairs) for pair in pairs],
+            *[_watch_pair(exchange, pair, builders[pair], pairs, trade_lock) for pair in pairs],
         )
     finally:
         await exchange.close()
