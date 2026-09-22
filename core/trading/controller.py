@@ -6,13 +6,13 @@ beyond the trading_enabled toggle a human sets in the dashboard.
 import json
 
 from config import settings
-from core import database as db
-from core.security import redact_secrets
+from core import db
+from core.trading.util import redact_secrets
 from core.trading import exchange, risk, strategy
 
 
 def _configured_secrets() -> list:
-    return [s for s in [settings.CRYPTO_API_KEY, settings.CRYPTO_API_SECRET] if s]
+    return [s for s in [db.get_secret("CRYPTO_API_KEY"), db.get_secret("CRYPTO_API_SECRET")] if s]
 
 
 def _pairs() -> list:

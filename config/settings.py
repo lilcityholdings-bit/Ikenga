@@ -47,3 +47,28 @@ GUARDRAILS = [
 ]
 
 DATABASE_PATH = os.getenv("DB_PATH", "").strip() or "data/bots.db"
+
+# --- crypto trading (real money once enabled in the dashboard) ---
+# CRYPTO_API_KEY / CRYPTO_API_SECRET are NOT here — like GITHUB_TOKEN, they
+# go through core.db.get_secret(), which checks the dashboard's Setup
+# screen before falling back to an env var of the same name. Everything
+# below is a plain tunable, not a credential, so it stays a static setting
+# like the rest of this file.
+CRYPTO_EXCHANGE = os.getenv("CRYPTO_EXCHANGE", "coinbase")
+CRYPTO_QUOTE_CURRENCY = os.getenv("CRYPTO_QUOTE_CURRENCY", "USD")
+CRYPTO_TRADING_PAIRS = os.getenv("CRYPTO_TRADING_PAIRS", "BTC/USD,ETH/USD")
+TRADING_TIMEFRAME = os.getenv("TRADING_TIMEFRAME", "1h")
+
+# Deliberately conservative defaults — there's no way to know the owner's
+# risk tolerance or capital from here. Review before enabling.
+TRADING_MAX_POSITION_USD = float(os.getenv("TRADING_MAX_POSITION_USD", "25"))
+TRADING_DAILY_LOSS_LIMIT_USD = float(os.getenv("TRADING_DAILY_LOSS_LIMIT_USD", "50"))
+TRADING_MAX_OPEN_POSITIONS = _int("TRADING_MAX_OPEN_POSITIONS", 2)
+TRADING_LOOP_INTERVAL_SECONDS = _int("TRADING_LOOP_INTERVAL_SECONDS", 900)
+
+# "poll" (default): the main worker checks prices on a timer, every
+# TRADING_LOOP_INTERVAL_SECONDS. "realtime": a separate process
+# (trading_stream.py) holds a live websocket connection instead. These are
+# mutually exclusive against the same account — see core/worker.py.
+TRADING_MODE = os.getenv("TRADING_MODE", "poll")
+REALTIME_CANDLE_INTERVAL_SECONDS = _int("REALTIME_CANDLE_INTERVAL_SECONDS", 60)

@@ -32,8 +32,8 @@ from datetime import datetime, timezone
 import ccxt.pro as ccxtpro
 
 from config import settings
-from core import database as db
-from core.security import redact_secrets
+from core import db
+from core.trading.util import redact_secrets
 from core.trading import risk, strategy
 
 RECONNECT_BACKOFF_SECONDS = [1, 2, 5, 10, 30, 60]
@@ -46,7 +46,7 @@ class RealtimeConfigError(Exception):
 
 
 def _configured_secrets() -> list:
-    return [s for s in [settings.CRYPTO_API_KEY, settings.CRYPTO_API_SECRET] if s]
+    return [s for s in [db.get_secret("CRYPTO_API_KEY"), db.get_secret("CRYPTO_API_SECRET")] if s]
 
 
 def _make_exchange():
@@ -56,8 +56,8 @@ def _make_exchange():
             f"ccxt.pro has no exchange named {settings.CRYPTO_EXCHANGE!r}"
         )
     return exchange_class({
-        "apiKey": settings.CRYPTO_API_KEY,
-        "secret": settings.CRYPTO_API_SECRET,
+        "apiKey": db.get_secret("CRYPTO_API_KEY"),
+        "secret": db.get_secret("CRYPTO_API_SECRET"),
         "enableRateLimit": True,
     })
 
@@ -251,7 +251,7 @@ async def _heartbeat_loop():
 
 
 async def main():
-    db.init_db()
+    db.init()
 
     if settings.TRADING_MODE != "realtime":
         raise RealtimeConfigError(
@@ -259,7 +259,7 @@ async def main():
             "TRADING_MODE=realtime before running trading_stream.py, and make sure "
             "worker.py isn't also running its own trading tick against this account."
         )
-    if not (settings.CRYPTO_API_KEY and settings.CRYPTO_API_SECRET):
+    if not (db.get_secret("CRYPTO_API_KEY") and db.get_secret("CRYPTO_API_SECRET")):
         raise RealtimeConfigError("CRYPTO_API_KEY / CRYPTO_API_SECRET are not set")
 
     pairs = [p.strip() for p in settings.CRYPTO_TRADING_PAIRS.split(",") if p.strip()]

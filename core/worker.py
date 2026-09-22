@@ -10,13 +10,13 @@ import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agents.bot import Bot
 from config.settings import (
     MAX_ARTICLES_PER_BOT_PER_HOUR, MAX_PARALLEL_BOTS, MAX_PENDING_QUEUE,
-    WORKER_INTERVAL_SECONDS,
+    TRADING_LOOP_INTERVAL_SECONDS, TRADING_MODE, WORKER_INTERVAL_SECONDS,
 )
 from core import db
 
@@ -150,10 +150,34 @@ def _run_once_locked():
     except Exception as e:
         db.log(0, "autopilot_error", str(e)[:300])
 
+    _maybe_run_trading_tick()
+
     beat(f"ran={ran} limited={len(blocked)} "
          f"auto_pub={auto.get('published', 0)} auto_rej={auto.get('rejected', 0)} "
          f"escalated={auto.get('escalated', 0)}")
     return {"ran": ran, "blocked": len(blocked), "auto": auto}
+
+
+def _maybe_run_trading_tick():
+    """Crypto trading is a separate subsystem from the content bots above —
+    own tables, own money, own safety gates (see core/trading/). Only runs
+    in TRADING_MODE=poll; in TRADING_MODE=realtime, trading_stream.py owns
+    it via its own persistent process, and this must stay out of its way
+    entirely so the same account is never traded by both at once."""
+    if TRADING_MODE != "poll":
+        return
+    try:
+        last = db.get_setting("trading_last_tick")
+        now = datetime.now(timezone.utc)
+        if last:
+            elapsed = (now - datetime.fromisoformat(last)).total_seconds()
+            if elapsed < TRADING_LOOP_INTERVAL_SECONDS:
+                return
+        db.set_setting("trading_last_tick", now.isoformat())
+        from core.trading.controller import run_trading_tick
+        run_trading_tick()
+    except Exception as e:
+        db.log_trading_activity("error", f"tick failed: {str(e)[:300]}")
 
 
 def run_forever():

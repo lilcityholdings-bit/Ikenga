@@ -7,6 +7,7 @@ guessing at defaults ccxt didn't give us.
 import ccxt
 
 from config import settings
+from core import db
 
 
 class ExchangeError(Exception):
@@ -14,11 +15,17 @@ class ExchangeError(Exception):
 
 
 _exchange = None
+_exchange_key = None
 
 
 def get_exchange():
-    global _exchange
-    if _exchange is not None:
+    """Rebuilds the client if the stored key changes — keys here can come
+    from the dashboard's Setup screen (core.db.get_secret), not just env
+    vars, and a stale cached client would silently keep using an old key."""
+    global _exchange, _exchange_key
+    api_key = db.get_secret("CRYPTO_API_KEY")
+    api_secret = db.get_secret("CRYPTO_API_SECRET")
+    if _exchange is not None and _exchange_key == (api_key, api_secret):
         return _exchange
     if not settings.CRYPTO_EXCHANGE:
         raise ExchangeError("CRYPTO_EXCHANGE is not set")
@@ -26,16 +33,19 @@ def get_exchange():
     if exchange_class is None:
         raise ExchangeError(f"Unknown exchange id: {settings.CRYPTO_EXCHANGE}")
     _exchange = exchange_class({
-        "apiKey": settings.CRYPTO_API_KEY,
-        "secret": settings.CRYPTO_API_SECRET,
+        "apiKey": api_key,
+        "secret": api_secret,
         "enableRateLimit": True,
     })
+    _exchange_key = (api_key, api_secret)
     return _exchange
 
 
 def is_configured() -> bool:
     return bool(
-        settings.CRYPTO_EXCHANGE and settings.CRYPTO_API_KEY and settings.CRYPTO_API_SECRET
+        settings.CRYPTO_EXCHANGE
+        and db.get_secret("CRYPTO_API_KEY")
+        and db.get_secret("CRYPTO_API_SECRET")
     )
 
 

@@ -20,7 +20,7 @@ business measuring or limiting.
 from datetime import datetime, timezone
 
 from config import settings
-from core import database as db
+from core import db
 from core.trading import exchange
 
 

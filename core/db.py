@@ -118,6 +118,34 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,
+    side TEXT NOT NULL,
+    amount REAL NOT NULL,
+    price REAL,
+    usd_value REAL,
+    order_id TEXT,
+    status TEXT NOT NULL,
+    reasoning TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trading_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    detail TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trading_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    daily_date TEXT,
+    daily_start_value_usd REAL,
+    tripped INTEGER NOT NULL DEFAULT 0,
+    reason TEXT
+);
+
 CREATE INDEX IF NOT EXISTS ix_bots_status   ON bots(status);
 CREATE INDEX IF NOT EXISTS ix_queue_status  ON queue(status);
 CREATE INDEX IF NOT EXISTS ix_queue_bot     ON queue(bot_id);
@@ -602,3 +630,135 @@ def kpis():
                 "rejected": 0, "articles": 0, "revenue": 0.0}
     finally:
         conn.close()
+
+
+# ----------------------------------------------------------------- trading
+# Separate subsystem from the content bots above — its own tables, its own
+# money, its own safety gates. See core/trading/.
+
+def record_trade(pair, side, amount, price, usd_value, order_id, status, reasoning):
+    def _go():
+        conn = connect()
+        try:
+            conn.execute(
+                "INSERT INTO trades (pair, side, amount, price, usd_value, order_id, "
+                "status, reasoning, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pair, side, amount, price, usd_value, order_id, status, reasoning, _now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def list_trades(limit=50):
+    conn = connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in c.fetchall()]
+    finally:
+        conn.close()
+
+
+def log_trading_activity(kind, detail=""):
+    def _go():
+        conn = connect()
+        try:
+            conn.execute(
+                "INSERT INTO trading_activity (kind, detail, created_at) VALUES (?,?,?)",
+                (kind, detail, _now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def get_recent_trading_activity(limit=30):
+    conn = connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM trading_activity ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in c.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_trading_state():
+    conn = connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM trading_state WHERE id=1")
+        r = c.fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def reset_trading_day(daily_date, start_value_usd):
+    """Called once per UTC day: records the portfolio's starting value so
+    the circuit breaker has a baseline, and clears any previous trip."""
+    def _go():
+        conn = connect()
+        try:
+            conn.execute(
+                "INSERT INTO trading_state (id, daily_date, daily_start_value_usd, tripped, reason) "
+                "VALUES (1,?,?,0,NULL) ON CONFLICT(id) DO UPDATE SET "
+                "daily_date=excluded.daily_date, "
+                "daily_start_value_usd=excluded.daily_start_value_usd, tripped=0, reason=NULL",
+                (daily_date, start_value_usd),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def trip_circuit_breaker(reason):
+    def _go():
+        conn = connect()
+        try:
+            conn.execute("UPDATE trading_state SET tripped=1, reason=? WHERE id=1", (reason,))
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def clear_circuit_breaker():
+    """Manual override from the dashboard — does not touch
+    daily_start_value_usd, so loss is still measured against the same
+    baseline for the rest of the day."""
+    def _go():
+        conn = connect()
+        try:
+            conn.execute("UPDATE trading_state SET tripped=0, reason=NULL WHERE id=1")
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def get_setting_age_seconds(key):
+    """Generic heartbeat-age check, used by the realtime trading stream —
+    a separate process from the main worker, so it can't use the file-based
+    heartbeat() in core/worker.py.
+
+    Values stored here may be naive (this module's own _now(), which uses
+    utcnow()) or timezone-aware (core/trading writes datetime.now(timezone.utc)
+    isoformat, which includes a +00:00 offset). Subtracting a naive datetime
+    from an aware one raises TypeError — silently caught below, which would
+    make this always return None for an aware timestamp otherwise. Both are
+    normalized to aware-UTC before comparing."""
+    from datetime import datetime, timezone
+    value = get_setting(key)
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return None

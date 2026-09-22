@@ -375,3 +375,80 @@ with st.expander("Recent activity"):
     for a2 in db.recent_actions(25):
         st.caption(f"{a2['created_at'][11:19]} · {a2.get('bot_name') or 'system'} · "
                    f"{a2['action']} · {str(a2.get('detail', ''))[:90]}")
+
+st.divider()
+
+# ---------------------------------------------------------------- trading
+
+st.header("Crypto trading")
+st.caption("A separate subsystem from the bots above — its own money, its own risk engine.")
+
+from core.trading import exchange as trading_exchange  # noqa: E402
+from config.settings import (  # noqa: E402
+    TRADING_DAILY_LOSS_LIMIT_USD, TRADING_MAX_OPEN_POSITIONS,
+    TRADING_MAX_POSITION_USD, TRADING_MODE,
+)
+
+if not trading_exchange.is_configured():
+    st.caption(
+        "Not configured — open Setup and paste an exchange API key "
+        "(trade + read only, never withdrawal-capable), or set "
+        "CRYPTO_API_KEY / CRYPTO_API_SECRET as environment variables."
+    )
+else:
+    st.error(
+        "This places REAL market orders with REAL money using a "
+        "deterministic moving-average strategy. Not guaranteed to be "
+        "profitable — review the limits below before turning it on."
+    )
+
+    if TRADING_MODE == "realtime":
+        from core.trading.realtime import HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_SETTING_KEY
+        stream_age = db.get_setting_age_seconds(HEARTBEAT_SETTING_KEY)
+        if stream_age is not None and stream_age < HEARTBEAT_INTERVAL_SECONDS * 3:
+            st.success(f"Realtime stream connected (heartbeat {stream_age:.0f}s ago)")
+        else:
+            st.error(
+                "Realtime stream not running — start it as its own service "
+                "(`python trading_stream.py`). The main worker will NOT trade "
+                "in its place while TRADING_MODE=realtime."
+            )
+    else:
+        st.caption("TRADING_MODE=poll — checked on a timer by the main worker.")
+
+    tc = st.columns(3)
+    tc[0].metric("Max position", f"${TRADING_MAX_POSITION_USD:.0f}")
+    tc[1].metric("Daily loss limit", f"${TRADING_DAILY_LOSS_LIMIT_USD:.0f}")
+    tc[2].metric("Max open positions", TRADING_MAX_OPEN_POSITIONS)
+    st.caption("Change these with env vars, not here — see README.")
+
+    trading_enabled = db.get_setting("trading_enabled", "false") == "true"
+    new_trading_enabled = st.toggle("Trading enabled", value=trading_enabled)
+    if new_trading_enabled != trading_enabled:
+        db.set_setting("trading_enabled", "true" if new_trading_enabled else "false")
+        st.rerun()
+
+    trading_state = db.get_trading_state()
+    if trading_state and trading_state.get("tripped"):
+        st.error(f"Circuit breaker TRIPPED: {trading_state['reason']}")
+        if st.button("Clear circuit breaker (resume trading)"):
+            db.clear_circuit_breaker()
+            st.rerun()
+    elif trading_state and trading_state.get("daily_start_value_usd") is not None:
+        st.success(f"Circuit breaker OK — today started at ${trading_state['daily_start_value_usd']:.2f}")
+    else:
+        st.caption("No trading activity yet — baseline is set on the first tick.")
+
+    with st.expander("Recent trades"):
+        trades = db.list_trades(limit=10)
+        if not trades:
+            st.write("No trades yet.")
+        for t in trades:
+            st.caption(
+                f"{t['created_at'][11:19]} · {t['side'].upper()} {t['amount']:.6f} "
+                f"{t['pair']} (~${(t['usd_value'] or 0):.2f}) — {t['status']}"
+            )
+
+    with st.expander("Trading activity"):
+        for a3 in db.get_recent_trading_activity(limit=15):
+            st.caption(f"{a3['created_at'][11:19]} · {a3['kind']} · {str(a3.get('detail', ''))[:100]}")

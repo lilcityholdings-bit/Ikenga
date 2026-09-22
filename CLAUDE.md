@@ -4,10 +4,21 @@ Autonomous bots research a niche, write articles, and grow one site each,
 published to GitHub Pages. The owner (or an automated critic) decides what
 goes live. Bots that produce accepted work breed; the rest are culled.
 
+This repo also carries a **separate crypto trading subsystem**
+(`core/trading/`), added after this rebuild, with its own tables, its own
+money, its own risk engine — deterministic (not LLM-decided), with a hard
+per-order cap, a hard max-open-positions cap, and a daily circuit breaker
+that halts everything until manually cleared. `tests/run_all.py` doesn't
+cover it; it has its own test history in this session, not in this repo's
+own suite yet — treat changes there with the same live-money caution as
+the invariants below, even without a test enforcing it. See README's
+Trading section before touching it.
+
 ## Commands
 
-    python tests/run_all.py    # 47 checks, fully offline
+    python tests/run_all.py    # 47 checks, fully offline — content bots only
     python run.py              # worker + dashboard on $PORT (default 8501)
+    python trading_stream.py   # only if TRADING_MODE=realtime — see README
 
 ## Rules
 
