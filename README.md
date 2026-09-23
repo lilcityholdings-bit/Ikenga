@@ -54,7 +54,26 @@ one domain is the doorway-page pattern search engines penalise.
     core/worker.py       the loop
     agents/bot.py        one bot, one cycle
     dashboard/app.py     control panel
+    core/operator.py     the Operator — one agent over every bot, see below
     core/trading/        crypto trading — separate subsystem, see below
+
+## The Operator
+
+One agent over everything in this repo. Give it a goal in plain English from
+the dashboard — "find a better niche for the weakest bot and switch it" — and
+it plans steps from its actions (research, read a page, check the fleet, set
+a niche, start/pause/add bots, run a writing cycle, read trading status and
+signals), runs them, reviews its own work, and retries if its review finds a
+gap.
+
+It keeps two memories that feed every later plan: **skills** (lessons it
+learned, plus recipes you teach it from the dashboard) and **mistakes**. You
+can delete either from the dashboard.
+
+It can read trading but never trade — no action turns trading on, places an
+order or clears the circuit breaker. Skills are recipes built from its
+actions, never code it writes and runs. Both lines exist because it reads web
+pages anyone can write, on a server that holds your exchange and GitHub keys.
 
 ## Trading
 

@@ -96,9 +96,12 @@ def call_llm(prompt: str, system: str = "", max_tokens: int = 800) -> str:
     if gemini and not _skip("gemini"):
         try:
             full = f"{system}\n\n{prompt}" if system else prompt
+            # Key in a header, not the URL: URLs end up in exception text and
+            # request logs, which is how a key leaks into the activity feed.
             r = _session.post(
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-1.5-flash:generateContent?key={gemini}",
+                "gemini-1.5-flash:generateContent",
+                headers={"x-goog-api-key": gemini},
                 json={"contents": [{"parts": [{"text": full}]}],
                       "generationConfig": {"maxOutputTokens": max_tokens}},
                 timeout=TIMEOUT,

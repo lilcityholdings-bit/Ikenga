@@ -378,6 +378,82 @@ with st.expander("Recent activity"):
 
 st.divider()
 
+# ---------------------------------------------------------------- operator
+
+from core import operator as op  # noqa: E402
+
+st.header("Operator")
+st.caption("One agent over every bot. Give it a goal in plain English: it plans, "
+           "acts on your content bots, reads your trading, checks its own work and "
+           "remembers what it learned. It can read trading but never trade.")
+
+goal = st.text_area("Goal for the operator", value="", height=80,
+                    placeholder="Find a better niche for the weakest bot and switch it over")
+if st.button("Run goal"):
+    if not goal.strip():
+        st.warning("Write a goal first")
+    else:
+        with st.spinner("Working on it..."):
+            task = op.run_goal(goal)
+        refresh()
+        if task["status"] == "done":
+            st.success(task["answer"] or "Done.")
+        else:
+            st.warning("Stopped short of the goal. " + (task["answer"] or "See the steps below."))
+
+with st.expander("What the operator did recently"):
+    tasks = db.get_operator_tasks(5)
+    if not tasks:
+        st.write("Nothing yet.")
+    for t in tasks:
+        st.markdown(f"**{t['goal'][:120]}** — {t['status']}")
+        if t["answer"]:
+            st.caption(t["answer"][:400])
+        for s in t["transcript"][:8]:
+            if s.get("action"):
+                st.caption(f"· {s['action']}: {str(s.get('result') or s.get('error'))[:140]}")
+            elif s.get("note"):
+                st.caption(f"· {s['note'][:140]}")
+
+with st.expander("Skills it knows"):
+    skills = db.get_memory("skill", 30)
+    if not skills:
+        st.write("None yet. It learns them from tasks, or you can teach one below.")
+    for s in skills:
+        sc = st.columns([5, 1])
+        sc[0].caption(f"**{s['title']}** ({s['source']}): {s['body']}")
+        if sc[1].button("Forget", key=f"forget{s['id']}"):
+            db.delete_memory(s["id"])
+            st.rerun()
+    st.markdown("**Teach it a skill**")
+    st.caption("A recipe in plain words, built from things it can already do. "
+               "It gets used in every plan from now on.")
+    skill_title = st.text_input("Skill name", key="teach_title",
+                                placeholder="Weekly niche review")
+    skill_body = st.text_area("How to do it", key="teach_body", height=80,
+                              placeholder="Check fleet_status, research the lowest scorer's "
+                                          "niche, and switch it if a narrower one looks better.")
+    if st.button("Teach skill"):
+        try:
+            op.teach(skill_title, skill_body)
+            st.success("Learned")
+            st.rerun()
+        except ValueError as e:
+            st.warning(str(e))
+
+with st.expander("Mistakes it has logged"):
+    mistakes = db.get_memory("mistake", 20)
+    if not mistakes:
+        st.write("None yet.")
+    for m in mistakes:
+        mc = st.columns([5, 1])
+        mc[0].caption(f"**{m['title']}**: {m['body']}")
+        if mc[1].button("Clear", key=f"clearm{m['id']}"):
+            db.delete_memory(m["id"])
+            st.rerun()
+
+st.divider()
+
 # ---------------------------------------------------------------- trading
 
 st.header("Crypto trading")

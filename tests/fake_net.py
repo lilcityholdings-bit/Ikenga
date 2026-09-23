@@ -27,6 +27,8 @@ def reset():
     REPO.clear()
     for k in CALLS:
         CALLS[k] = 0
+    OPERATOR_SCRIPT.clear()
+    OPERATOR_PROMPTS.clear()
 
 
 # ------------------------------------------------- hidden "true quality"
@@ -147,6 +149,24 @@ def _critique(prompt):
             f"FIX: add more measured comparisons")
 
 
+# ------------------------------------------------------------------ operator
+
+# Tests queue exact model replies here, in order; each plan or review call
+# pops one. Every prompt the operator sent is kept so tests can check what
+# it was shown (its memories, the results, the retry wording).
+OPERATOR_SCRIPT = []
+OPERATOR_PROMPTS = []
+
+
+def _operate(user):
+    OPERATOR_PROMPTS.append(user)
+    if OPERATOR_SCRIPT:
+        return OPERATOR_SCRIPT.pop(0)
+    if "OPERATOR PLAN" in user:
+        return '{"steps": [{"action": "fleet_status", "args": {}, "why": "look first"}]}'
+    return '{"complete": true, "answer": "Checked the fleet.", "gaps": [], "skills": [], "mistakes": []}'
+
+
 # ------------------------------------------------------------------ search
 
 def _search_html(query):
@@ -188,7 +208,9 @@ def fake_post(url, **kw):
     if not msgs and body.get("contents"):
         system = user = body["contents"][0]["parts"][0]["text"]
 
-    if "strict editor" in system or "BEGIN DRAFT" in user:
+    if "You are the Operator" in system:
+        text = _operate(user)
+    elif "strict editor" in system or "BEGIN DRAFT" in user:
         text = _critique(user)
     else:
         title, article, _ = _write_article(system)

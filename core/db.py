@@ -138,6 +138,25 @@ CREATE TABLE IF NOT EXISTS trading_activity (
     created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS operator_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT,
+    source TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS operator_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal TEXT NOT NULL,
+    status TEXT,
+    answer TEXT,
+    transcript TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS trading_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     daily_date TEXT,
@@ -738,6 +757,93 @@ def clear_circuit_breaker():
         finally:
             conn.close()
     return retry(_go)
+
+
+# ----------------------------------------------------------------- operator
+# The operator's two memories: skills (lessons it learned, or recipes the
+# owner taught it) and mistakes. Both are read back into every later plan.
+
+def add_memory(kind, title, body, source):
+    """Same title and kind replaces the old entry, so repeating a lesson
+    updates it instead of filling the prompt with near-duplicates."""
+    def _go():
+        conn = connect()
+        try:
+            conn.execute("DELETE FROM operator_memory WHERE kind=? AND lower(title)=lower(?)",
+                         (kind, title))
+            c = conn.execute(
+                "INSERT INTO operator_memory (kind, title, body, source, created_at) "
+                "VALUES (?,?,?,?,?)", (kind, title, body, source, _now()))
+            conn.commit()
+            return c.lastrowid
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def get_memory(kind, limit=20):
+    conn = connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM operator_memory WHERE kind=? ORDER BY id DESC LIMIT ?",
+                  (kind, limit))
+        return [dict(r) for r in c.fetchall()]
+    finally:
+        conn.close()
+
+
+def delete_memory(memory_id):
+    def _go():
+        conn = connect()
+        try:
+            conn.execute("DELETE FROM operator_memory WHERE id=?", (memory_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def create_operator_task(goal):
+    def _go():
+        conn = connect()
+        try:
+            c = conn.execute(
+                "INSERT INTO operator_tasks (goal, status, answer, transcript, created_at, "
+                "updated_at) VALUES (?, 'running', '', '[]', ?, ?)", (goal, _now(), _now()))
+            conn.commit()
+            return c.lastrowid
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def update_operator_task(task_id, status, answer, transcript):
+    def _go():
+        conn = connect()
+        try:
+            conn.execute(
+                "UPDATE operator_tasks SET status=?, answer=?, transcript=?, updated_at=? "
+                "WHERE id=?", (status, answer, json.dumps(transcript), _now(), task_id))
+            conn.commit()
+        finally:
+            conn.close()
+    return retry(_go)
+
+
+def get_operator_tasks(limit=10):
+    conn = connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM operator_tasks ORDER BY id DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in c.fetchall()]
+        for r in rows:
+            try:
+                r["transcript"] = json.loads(r["transcript"] or "[]")
+            except Exception:
+                r["transcript"] = []
+        return rows
+    finally:
+        conn.close()
 
 
 def get_setting_age_seconds(key):

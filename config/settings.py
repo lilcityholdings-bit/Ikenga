@@ -48,6 +48,13 @@ GUARDRAILS = [
 
 DATABASE_PATH = os.getenv("DB_PATH", "").strip() or "data/bots.db"
 
+# --- operator (the one agent over every bot) ---
+# Rounds of plan -> act -> self-review before it reports being stuck, and the
+# most actions one plan may take. Each round is several model calls, so these
+# cap both runaway loops and free-tier API spend.
+OPERATOR_MAX_LOOPS = _int("OPERATOR_MAX_LOOPS", 2)
+OPERATOR_MAX_STEPS = _int("OPERATOR_MAX_STEPS", 6)
+
 # --- crypto trading (real money once enabled in the dashboard) ---
 # CRYPTO_API_KEY / CRYPTO_API_SECRET are NOT here — like GITHUB_TOKEN, they
 # go through core.db.get_secret(), which checks the dashboard's Setup

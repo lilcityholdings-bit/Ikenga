@@ -4,19 +4,21 @@ Autonomous bots research a niche, write articles, and grow one site each,
 published to GitHub Pages. The owner (or an automated critic) decides what
 goes live. Bots that produce accepted work breed; the rest are culled.
 
-This repo also carries a **separate crypto trading subsystem**
-(`core/trading/`), added after this rebuild, with its own tables, its own
-money, its own risk engine — deterministic (not LLM-decided), with a hard
-per-order cap, a hard max-open-positions cap, and a daily circuit breaker
-that halts everything until manually cleared. `tests/run_all.py` doesn't
-cover it; it has its own test history in this session, not in this repo's
-own suite yet — treat changes there with the same live-money caution as
-the invariants below, even without a test enforcing it. See README's
-Trading section before touching it.
+This repo also carries a **crypto trading subsystem** (`core/trading/`) with
+its own tables, money and risk engine — deterministic (not LLM-decided), a
+hard per-order cap, a hard max-open-positions cap, and a daily circuit
+breaker that halts everything until manually cleared. See README's Trading
+section before touching it.
+
+Over both sits the **Operator** (`core/operator.py`): one agent you give a
+goal in plain English. It plans from a fixed list of actions (`ACTIONS`),
+runs them, reviews its own work, retries on gaps, and keeps a skills library
+and a mistake log that feed every later plan. New abilities are one entry in
+`ACTIONS`; new know-how is a skill, taught from the dashboard or learned.
 
 ## Commands
 
-    python tests/run_all.py    # 47 checks, fully offline — content bots only
+    python tests/run_all.py    # 81 checks, fully offline — bots, operator, trading
     python run.py              # worker + dashboard on $PORT (default 8501)
     python trading_stream.py   # only if TRADING_MODE=realtime — see README
 
@@ -50,6 +52,18 @@ Trading section before touching it.
 - One site per bot. Per-article sites destroy the SEO value of the work.
 - A rejection removes the page from the site, not just a database row.
 - `run_once()` takes a file lock; dashboard and worker are separate processes.
+- The Operator can read trading but has no action that trades, enables
+  trading or clears the circuit breaker. It reads attacker-influenceable
+  pages; being talked into a trade costs real money. Owner toggle only.
+- Operator "skills" are recipes, never code it writes and runs — this server
+  holds exchange and GitHub keys, and self-written code turns one poisoned
+  page into code running beside them.
+- Everything the Operator carries forward (learned skills, gaps between
+  retries) passes the critic's `_INJECTION` filter first; tool results that
+  trip it are withheld from the model entirely.
+- Realtime trading serializes signal handling across pairs with one shared
+  lock. Without it, simultaneous buys each passed the position-cap check
+  before any had filled (3 pairs, cap 1, 3 positions opened).
 
 ## Measured behaviour (from tests/run_all.py)
 
