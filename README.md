@@ -83,6 +83,11 @@ Implemented and running today:
   everything; IPs are visible; timing correlation still works). Read `src/privacy.rs`'s threat
   model before relying on any of it.
 
+- **Auto Body Shop** (`services/auto-body-shop/`) — a separate stdlib-Python service that
+  stages, approves and rolls back AI agents' system instructions from live telemetry (spec in its
+  `openapi.yaml`). The optimizer only ever stages; promotion is always an explicit approve. See its
+  README; `python3 test_server.py` runs its tests with no setup.
+
 Stubbed with clear interfaces, not implemented (see `docs/ROADMAP.md` + `docs/COMPLIANCE-NOTES.md`
 for why these aren't just "more code"):
 

@@ -23,5 +23,21 @@ services:
       start_period: 5s
       retries: 3
 
+  auto-body-shop:
+    build: ./services/auto-body-shop
+    ports:
+      - "8090:8090"
+    volumes:
+      - abs-data:/app/data
+    environment:
+      # Set both for a real deployment — production mode refuses to start without the admin key,
+      # because otherwise anyone who can reach the port can approve or roll back prompts.
+      # - ABS_ENV=production
+      # - ABS_ADMIN_KEY=<generate with: openssl rand -hex 32>
+      # ABS_OPTIMIZER: claude          # plus ANTHROPIC_API_KEY; default "none" stages nothing
+      ABS_BATCH_SIZE: "100"
+    restart: unless-stopped
+
 volumes:
   ikenga-data:
+  abs-data:
