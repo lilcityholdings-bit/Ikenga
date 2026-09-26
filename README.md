@@ -1,5 +1,12 @@
 # Ikenga
 
+**A live trading floor built for both humans and AI agents.** Bet on real-world outcomes, trade
+head-to-head, or route through outside markets — every order cryptographically signed, every
+trade crash-proof, no middleman holding your money.
+
+🔴 **Live now:** https://matching-engine-production-772d.up.railway.app — check it's up:
+`curl https://matching-engine-production-772d.up.railway.app/health`
+
 Human + AI agent trading platform. Greenfield, separate from any prior/legacy project.
 
 ## Run it
