@@ -148,6 +148,9 @@ pub struct AppState {
     /// per-call billing model — the only way a router earns without an on-chain fee split. Not
     /// durable yet (see the routing section of docs/CUSTODY.md).
     pub route_calls: Mutex<HashMap<String, u64>>,
+    /// The outside referee for disputed markets and the source of the public trust score shown
+    /// beside each agent. See `agenttrust.rs`.
+    pub agenttrust: crate::agenttrust::AgentTrust,
 }
 
 /// The identity the venue's own seed liquidity is booked against.
@@ -186,6 +189,12 @@ impl AppState {
             books.insert(symbol.to_string(), Mutex::new(OrderBook::new(*symbol)));
             symbol_ids.insert(symbol.to_string(), (i + 1) as u16);
         }
+        let owner_key = std::env::var("IKENGA_OWNER_KEY")
+            .ok()
+            .and_then(|s| crate::crypto::hex_decode(&s))
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| crate::crypto::secure_random_bytes(32));
+        let agenttrust = crate::agenttrust::AgentTrust::from_env(&owner_key);
         Self {
             books,
             balances: Mutex::new(HashMap::new()),
@@ -206,11 +215,7 @@ impl AppState {
             disclosures: crate::privacy::DisclosureLog::default(),
             fee_ledger: Mutex::new(HashMap::new()),
             volume_usd: Mutex::new(HashMap::new()),
-            owner_key: std::env::var("IKENGA_OWNER_KEY")
-                .ok()
-                .and_then(|s| crate::crypto::hex_decode(&s))
-                .filter(|b| !b.is_empty())
-                .unwrap_or_else(|| crate::crypto::secure_random_bytes(32)),
+            owner_key,
             tick_seq: AtomicU64::new(0),
             rate_limit_disabled: std::env::var("IKENGA_DISABLE_RATE_LIMIT").as_deref() == Ok("1"),
             wal: crate::wal::Wal::disabled(),
@@ -230,6 +235,7 @@ impl AppState {
             reserves: Mutex::new(HashMap::new()),
             withdrawals: Mutex::new(Vec::new()),
             route_calls: Mutex::new(HashMap::new()),
+            agenttrust,
         }
     }
 
@@ -377,6 +383,7 @@ impl AppState {
                 Record::MarketProposed {
                     market_id, outcome, proposed_at_ms, evidence, automatic,
                 } => {
+                    self.agenttrust.referrals.lock().unwrap().remove(&market_id);
                     if let Some(m) = self.markets.lock().unwrap().get_mut(&market_id) {
                         m.proposal = Some(crate::prediction::Proposal {
                             outcome: outcome.map(|o| o as usize),
@@ -455,6 +462,12 @@ impl AppState {
                             m.disputed_at_ms = Some(disputed_at_ms);
                         }
                     }
+                }
+                Record::MarketReferred { market_id, agreement_id } => {
+                    self.agenttrust.referrals.lock().unwrap().insert(
+                        market_id,
+                        crate::agenttrust::Referral { agreement_id, last_polled_ms: 0 },
+                    );
                 }
                 Record::StakePlaced { market_id, agent_id, outcome_idx, amount, placed_at_ms } => {
                     // Balances are restored by the Balance records written alongside this one,
@@ -1171,6 +1184,8 @@ impl AppState {
         // the ordinary dispute window runs again on the new outcome.
         market.disputed_at_ms = None;
         drop(markets);
+        // A fresh proposal answers any dispute that was out with Agenttrust.
+        self.agenttrust.referrals.lock().unwrap().remove(market_id);
         self.events.record(
             crate::events::EventKind::OutcomeProposed,
             market_id,

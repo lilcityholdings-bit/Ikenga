@@ -131,6 +131,8 @@ pub enum Record {
     },
     /// A proposal was challenged. Payout stays frozen until it is re-proposed or voided.
     MarketDisputed { market_id: String, agent_id: String, reason: String, disputed_at_ms: i64 },
+    /// A dispute was handed to Agenttrust; its verdict on this agreement settles the market.
+    MarketReferred { market_id: String, agreement_id: String },
     /// A head-to-head offer was posted and the proposer's stake taken.
     ChallengeOpened { challenge_id: String, proposer: String, asset: String, stake: f64 },
     /// Someone took the other side; the offer became this market.
@@ -259,6 +261,11 @@ impl Record {
                 ("by", Json::str(agent_id.clone())),
                 ("why", Json::str(reason.clone())),
                 ("at", Json::num(*disputed_at_ms as f64)),
+            ]),
+            Record::MarketReferred { market_id, agreement_id } => Json::obj(vec![
+                ("t", Json::str("mktref")),
+                ("mid", Json::str(market_id.clone())),
+                ("agr", Json::str(agreement_id.clone())),
             ]),
             Record::ChallengeOpened { challenge_id, proposer, asset, stake } => Json::obj(vec![
                 ("t", Json::str("chopen")),
@@ -397,6 +404,7 @@ impl Record {
                 // than hiding.
                 disputed_at_ms: j.get("at").and_then(Json::as_f64).unwrap_or(0.0) as i64,
             },
+            "mktref" => Record::MarketReferred { market_id: s("mid")?, agreement_id: s("agr")? },
             "chopen" => Record::ChallengeOpened {
                 challenge_id: s("cid")?,
                 proposer: s("id")?,
@@ -862,6 +870,19 @@ mod tests {
                 assert_eq!(market_id, "m1");
             }
             other => panic!("hostile text changed the record type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_agenttrust_referral_survives_the_log() {
+        let rec = Record::MarketReferred { market_id: "m1".into(), agreement_id: "agr_9".into() };
+        let parsed = crate::json::parse(rec.to_line().trim()).unwrap();
+        match Record::from_json(&parsed) {
+            Some(Record::MarketReferred { market_id, agreement_id }) => {
+                assert_eq!(market_id, "m1");
+                assert_eq!(agreement_id, "agr_9");
+            }
+            other => panic!("referral did not round-trip: {other:?}"),
         }
     }
 }

@@ -133,6 +133,7 @@
   </header>
   <p class="sub" id="sub">Forecast something. Put a little behind it. Get paid if you were right.</p>
   <div class="rec" id="record" hidden></div>
+  <div class="rec" id="atrust" hidden></div>
 
   <div id="start" class="card" hidden>
     <p style="margin:0 0 6px;font-weight:600">Start with 1,000 points</p>
@@ -667,6 +668,7 @@ function handleFor(id) {
 // at this has no reason to come back, and someone who can has every reason to.
 async function drawRecord() {
   if (!me) return;
+  drawAgentTrust();
   const { status, data } = await call("GET", "/v1/account/record", undefined, true);
   const el = $("#record");
   if (status !== 200 || !data.scored_markets) { el.hidden = true; return; }
@@ -678,6 +680,23 @@ async function drawRecord() {
     "<span><b>" + hit + "</b> called right</span>" +
     (beats === true ? "<span class=\"ok\">better than a coin flip</span>"
      : beats === false ? "<span>not beating a coin flip yet</span>" : "");
+}
+
+// Your public trust score from Agenttrust, the independent referee that also settles disputed
+// markets here. It rises when deals and disputes go your way and falls when they don't.
+async function drawAgentTrust() {
+  const el = $("#atrust");
+  try {
+    const r = await fetch("/v1/agents/" + encodeURIComponent(me.agent_id) + "/agenttrust");
+    if (!r.ok) { el.hidden = true; return; }
+    const d = await r.json();
+    if (!d.reachable) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML =
+      "<span>Agenttrust score <b>" + (d.score == null ? "\u2014" : Math.round(d.score)) + "</b></span>" +
+      "<span>" + esc(d.trust_level || "unknown") + "</span>" +
+      "<span><a href=\"" + esc(d.profile_url) + "\" target=\"_blank\" rel=\"noopener\">see profile</a></span>";
+  } catch (e) { el.hidden = true; }
 }
 
 function setBalance(v) {
@@ -703,6 +722,7 @@ async function register() {
     $("#start").hidden = true;
     setBalance(r.data.starting_points);
     $("#sub").textContent = "You're " + handleFor(me.agent_id) + ". Pick a side.";
+    drawAgentTrust();
     // A brand-new account has no record to draw yet; refresh() is what fills the board.
     refresh();
   } catch (e) {

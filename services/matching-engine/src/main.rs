@@ -1,3 +1,4 @@
+mod agenttrust;
 mod api;
 mod auth;
 mod bench;
@@ -16,6 +17,7 @@ mod orderbook;
 mod prediction;
 mod privacy;
 mod router;
+mod starter;
 mod state;
 mod trust;
 mod types;
@@ -74,6 +76,10 @@ fn main() {
     };
 
     install_liquidity_sources(&mut state, production);
+    let opened = starter::open_starter_markets(&state, api::now_ms_pub());
+    if opened > 0 {
+        println!("opened {opened} starter AI/agent-news market(s), free points only");
+    }
     let state = Arc::new(state);
 
     if production && std::env::var("IKENGA_OWNER_KEY").is_err() {
@@ -238,6 +244,7 @@ fn main() {
     // stop before it redeploys, so this is the normal shutdown path, not an edge case.
     install_shutdown_handler(Arc::clone(&state));
     install_settlement_sweeper(Arc::clone(&state));
+    install_agenttrust_referee(Arc::clone(&state));
 
     // One thread per *connection*, with keep-alive, and a hard cap on how many at once.
     //
@@ -470,6 +477,7 @@ fn route(state: &Arc<AppState>, req: &http::Request) -> http::Response {
         ("GET", ["v1", "fees"]) => api::get_fee_schedule(&state, &req),
         ("GET", ["v1", "route"]) => api::get_route(&state, &req),
         ("POST", ["v1", "agents"]) => api::register_agent(&state, &req),
+        ("GET", ["v1", "agents", agent_id, "agenttrust"]) => api::get_agenttrust(&state, agent_id),
         ("GET", ["v1", "markets"]) => api::list_markets(&state, &req),
         ("POST", ["v1", "markets"]) => api::create_market(&state, &req),
         ("GET", ["v1", "markets", market_id]) => api::get_market(&state, &req, market_id),
@@ -1032,4 +1040,119 @@ fn install_shutdown_handler(state: Arc<AppState>) {
         thread::sleep(Duration::from_secs(1));
         state.wal.sync();
     });
+}
+
+/// Sends disputed markets to Agenttrust and applies its verdicts. See `agenttrust.rs`.
+///
+/// Its own thread, not part of the settlement sweeper, because every step here is a network call
+/// to another service and settlement must never wait on one. Whatever happens here, the
+/// sweeper's 24-hour review backstop still voids and refunds a dispute nobody decided.
+fn install_agenttrust_referee(state: Arc<AppState>) {
+    if !state.agenttrust.resolves_disputes() {
+        return;
+    }
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(10));
+        agenttrust_tick(&state, api::now_ms_pub());
+    });
+}
+
+fn agenttrust_tick(state: &AppState, now: i64) {
+    let at = &state.agenttrust;
+
+    // 1. New disputes -> open an Agenttrust agreement.
+    let pending: Vec<(String, (String, Option<usize>, String))> =
+        at.pending.lock().unwrap().drain().collect();
+    for (market_id, (disputer, claimed, reason)) in pending {
+        if at.referrals.lock().unwrap().contains_key(&market_id) {
+            continue;
+        }
+        let details = {
+            let markets = state.markets.lock().unwrap();
+            markets.get(&market_id).and_then(|m| {
+                let p = m.proposal.as_ref()?;
+                (m.status == prediction::MarketStatus::Disputed).then(|| {
+                    (m.question.clone(), m.outcomes.clone(), p.outcome, p.evidence.clone())
+                })
+            })
+        };
+        let Some((question, outcomes, proposed, evidence)) = details else { continue };
+        let pool: f64 = state
+            .stakes
+            .lock()
+            .unwrap()
+            .get(&market_id)
+            .map(|v| v.iter().map(|s| s.amount).sum())
+            .unwrap_or(0.0);
+        let claimed = claimed.filter(|c| *c < outcomes.len());
+        match at.refer(
+            &market_id, &question, &outcomes, pool, proposed, &evidence, &disputer, claimed, &reason,
+        ) {
+            Ok(agreement_id) => {
+                println!("agenttrust: {market_id} dispute sent to Agenttrust as {agreement_id}");
+                state.wal.append(&[wal::Record::MarketReferred {
+                    market_id: market_id.clone(),
+                    agreement_id: agreement_id.clone(),
+                }]);
+                at.referrals.lock().unwrap().insert(
+                    market_id,
+                    agenttrust::Referral { agreement_id, last_polled_ms: now },
+                );
+            }
+            Err(e) => {
+                eprintln!("agenttrust: could not refer {market_id}: {e}");
+                // A network blip is worth another try; a refusal (bad key etc.) is not — the
+                // dispute stays with the operator as it always did.
+                if e.contains("could not be reached") {
+                    at.pending.lock().unwrap().entry(market_id).or_insert((disputer, claimed, reason));
+                }
+            }
+        }
+    }
+
+    // 2. Open referrals -> check for a verdict and apply it.
+    let due: Vec<(String, String)> = at
+        .referrals
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .filter(|(_, r)| now - r.last_polled_ms >= agenttrust::POLL_EVERY_MS)
+        .map(|(m, r)| {
+            r.last_polled_ms = now;
+            (m.clone(), r.agreement_id.clone())
+        })
+        .collect();
+    for (market_id, agreement_id) in due {
+        let outcome_count = {
+            let markets = state.markets.lock().unwrap();
+            match markets.get(&market_id) {
+                Some(m) if m.status == prediction::MarketStatus::Disputed => Some(m.outcomes.len()),
+                _ => None,
+            }
+        };
+        let Some(outcome_count) = outcome_count else {
+            // Already settled some other way (operator, backstop): nothing left to decide.
+            at.referrals.lock().unwrap().remove(&market_id);
+            continue;
+        };
+        match at.verdict(&agreement_id, outcome_count) {
+            Some(agenttrust::Verdict::Outcome(k)) => {
+                let evidence = format!("Agenttrust agreement {agreement_id} ruled outcome {k}");
+                if let Err(e) = state.propose_outcome(&market_id, Some(k), evidence, true, now) {
+                    eprintln!("agenttrust: could not apply verdict on {market_id}: {e}");
+                    continue;
+                }
+                if state.resolve_market(&market_id, Some(k)).is_some() {
+                    println!("agenttrust: {market_id} settled on outcome {k} by {agreement_id}");
+                }
+            }
+            Some(agenttrust::Verdict::Void) => {
+                at.referrals.lock().unwrap().remove(&market_id);
+                if state.resolve_market(&market_id, None).is_some() {
+                    println!("agenttrust: {market_id} voided by {agreement_id}; every stake refunded");
+                }
+            }
+            Some(agenttrust::Verdict::Wait) | None => {}
+        }
+    }
 }

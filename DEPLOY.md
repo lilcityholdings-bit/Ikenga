@@ -55,6 +55,11 @@ not yet reachable by anyone outside whatever host it runs on:
 | `IKENGA_OWNER_KEY` | auto-generated per boot | Required in production. Guards `/v1/treasury`, `/v1/compliance/*`, `/dev/faucet/*`. |
 | `IKENGA_WAL_PATH` | `data/ikenga.wal` | Where the write-ahead log lives. `off` only allowed outside production. |
 | `IKENGA_WAL_SYNC` | `always` | `always` (fsync every record, safest), `interval` (batched, can lose ~200ms on a crash), `never` (load-testing only — see `src/wal.rs`). |
+| `AGENTTRUST_URL` | the live Agenttrust service | Where trust scores and dispute rulings come from. `off` disables both. |
+| `AGENTTRUST_API_KEY` | unset | An Agenttrust platform key (create one on Agenttrust's `/admin` page). Without it trust scores still show, but disputes stay with the operator. |
+| `AGENTTRUST_ARBITER` | unset | Optional: an Agenttrust id to decide disputes, instead of a drawn jury. Useful while Agenttrust's jury pool is small. |
+| `AGENTTRUST_SECRET` | the owner key | Seed for the per-agent secrets Ikenga uses on Agenttrust. Keep it stable or agents lose their Agenttrust identities. |
+| `IKENGA_STARTER_MARKETS` | on | `off` skips opening the five starter AI/agent-news markets. |
 | `IKENGA_ENABLE_ORDERBOOK` | unset (off) | Set `1` to turn on the custodial BTC-USD/ETH-USD/SOL-USD order book. Off by default because pari-mutuel markets need no counterparty and are what a fresh deployment can run on day one. |
 
 ## Verified this round
@@ -106,6 +111,10 @@ from reading the code alone — they needed the deploy path actually exercised:
    actual server process (not just an unrelated `docker exec`) runs as UID 999, not root.
 
 ## Deployed
+
+Railway deploys **only** from the `claude/ikenga-work-history-9vj0iy` branch of this repo (pinned in
+the service's source settings). Before it was pinned, pushes to other branches — including the
+unrelated `claude/money-bot-mmnzpy` — triggered deploys of this service; one failed on 20 Sep 2026.
 
 Live on Railway as of this round: build from `services/matching-engine/Dockerfile` via
 `rootDirectory: services/matching-engine`, a persistent volume mounted at `/app/data`,

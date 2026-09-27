@@ -660,6 +660,19 @@ pub fn get_account(state: &AppState, req: &Request) -> Response {
                 Json::num(state.trust.get_forecast_score(&agent_id) as f64),
             ),
             ("rate_limit_per_sec", Json::num(band.rate_limit_per_sec() as f64)),
+            // Your public score on Agenttrust, the outside referee for disputes. Fetched live
+            // from GET /v1/agents/{id}/agenttrust; linked here so it's one step away.
+            (
+                "agenttrust",
+                match state.agenttrust.profile_url(&agent_id) {
+                    Some(url) => Json::obj(vec![
+                        ("agenttrust_id", Json::str(crate::agenttrust::agenttrust_id(&agent_id))),
+                        ("score_url", Json::str(format!("/v1/agents/{agent_id}/agenttrust"))),
+                        ("profile_url", Json::str(url)),
+                    ]),
+                    None => Json::Null,
+                },
+            ),
             ("balances", Json::Array(balances)),
             ("positions", Json::Array(positions)),
             ("open_orders", Json::Array(open_orders)),
@@ -2247,21 +2260,42 @@ pub fn dispute_outcome(state: &AppState, req: &Request, market_id: &str) -> Resp
             ApiError::new("MISSING_FIELD", "reason is required to dispute a proposal"),
         );
     }
+    // Optional: which outcome the disputer says is actually right. Passed to Agenttrust as their
+    // side of the argument; without it they argue the market can't be determined (void).
+    let claimed = parsed.get("outcome").and_then(crate::json::Json::as_f64).map(|o| o.max(0.0) as usize);
     match state.dispute_outcome(market_id, &agent_id, reason) {
-        Ok(()) => Response::json(
+        Ok(()) => {
+            let referee = state.agenttrust.resolves_disputes();
+            if referee {
+                state
+                    .agenttrust
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .entry(market_id.to_string())
+                    .or_insert((agent_id.clone(), claimed, reason.to_string()));
+            }
+            Response::json(
             200,
             &Json::obj(vec![
                 ("market_id", Json::str(market_id)),
                 ("status", Json::str("Disputed")),
                 ("disputed_by", Json::str(agent_id)),
+                ("resolver", Json::str(if referee { "agenttrust" } else { "operator" })),
                 (
                     "note",
-                    Json::str(
-                        "Payout is frozen. The market must be re-proposed with evidence, or                          voided and everyone refunded.",
-                    ),
+                    Json::str(if referee {
+                        "Payout is frozen. The dispute goes to Agenttrust, an independent referee: \
+                         its verdict is paid out, and if it can't decide the market voids and \
+                         everyone is refunded."
+                    } else {
+                        "Payout is frozen. The market must be re-proposed with evidence, or \
+                         voided and everyone refunded."
+                    }),
                 ),
             ]),
-        ),
+        )
+        }
         Err(e) => err_response(409, ApiError::new("CANNOT_DISPUTE", e)),
     }
 }
@@ -3655,9 +3689,15 @@ pub fn get_spec(state: &AppState, req: &Request) -> Response {
                        "The crowd's consensus per market. Aggregates only — no identities, ever. A subscriber key gets it live and calibration-weighted.",
                        none(), "markets[] with consensus, track_record"),
                     ep("POST", "/v1/markets/{id}/dispute", "signed",
-                       "Challenge a proposed outcome. Requires a stake in that market. Freezes the payout for review, temporarily.",
-                       Json::obj(vec![("reason", Json::str("string, required"))]),
-                       "confirmation that the payout is frozen"),
+                       "Challenge a proposed outcome. Requires a stake in that market. Freezes the payout; Agenttrust, an independent referee, decides.",
+                       Json::obj(vec![
+                           ("reason", Json::str("string, required")),
+                           ("outcome", Json::str("index you say is right, optional; omitted means 'can't be determined'")),
+                       ]),
+                       "confirmation that the payout is frozen, and who resolves it"),
+                    ep("GET", "/v1/agents/{id}/agenttrust", "none",
+                       "An agent's public Agenttrust trust score (0-1000) and level.",
+                       none(), "score, trust_level, profile_url"),
                     ep("GET", "/v1/reserves", "none",
                        "Whether redeemable balances are fully backed. Arithmetic, not a promise.",
                        none(), "outstanding, held, shortfall, fully_backed"),
@@ -3799,7 +3839,8 @@ pub fn index(state: &AppState) -> Response {
                     ep("POST", "/v1/markets/{id}/stakes", "signed", "Back an outcome with points — no counterparty needed. Add \"dry_run\": true to run every check and commit nothing."),
                     ep("POST", "/v1/markets", "signed", "Open your own market with machine-checkable terms"),
                     ep("POST", "/v1/markets/{id}/propose", "signed", "Propose the outcome, starting the dispute window"),
-                    ep("POST", "/v1/markets/{id}/dispute", "signed", "Challenge a proposed outcome; anyone may"),
+                    ep("POST", "/v1/markets/{id}/dispute", "signed", "Challenge a proposed outcome; Agenttrust referees it"),
+                    ep("GET", "/v1/agents/{id}/agenttrust", "none", "An agent's public Agenttrust trust score"),
                     ep("POST", "/v1/markets/{id}/finalize", "signed", "Pay out once the window has elapsed"),
                     ep("POST", "/v1/challenges", "signed", "Offer a head-to-head bet and put your money up — live only once someone takes the other side"),
                     ep("GET", "/v1/challenges", "none", "Bets waiting for someone to take the other side"),
@@ -4440,4 +4481,38 @@ pub fn dev_faucet(state: &AppState, req: &Request, agent_id: &str, asset: &str) 
 /// platform's running order count in every ID it handed out. See privacy.rs.
 fn generate_id() -> String {
     crate::privacy::random_id("")
+}
+
+/// `GET /v1/agents/{id}/agenttrust` — the agent's public Agenttrust trust score. No auth: the
+/// score is public on Agenttrust already, and showing it is the point.
+pub fn get_agenttrust(state: &AppState, agent_id: &str) -> Response {
+    let at = &state.agenttrust;
+    let Some(profile) = at.profile_url(agent_id) else {
+        return err_response(
+            404,
+            ApiError::new("AGENTTRUST_OFF", "Agenttrust is switched off on this deployment"),
+        );
+    };
+    let view = at.trust(agent_id, now_ms());
+    Response::json(
+        200,
+        &Json::obj(vec![
+            ("agent_id", Json::str(agent_id)),
+            ("agenttrust_id", Json::str(crate::agenttrust::agenttrust_id(agent_id))),
+            ("reachable", Json::Bool(view.is_some())),
+            (
+                "score",
+                view.as_ref().and_then(|v| v.score).map(Json::num).unwrap_or(Json::Null),
+            ),
+            (
+                "trust_level",
+                view.as_ref()
+                    .and_then(|v| v.verdict.clone())
+                    .map(Json::str)
+                    .unwrap_or(Json::Null),
+            ),
+            ("profile_url", Json::str(profile)),
+            ("scale", Json::str("0-1000 from Agenttrust; every new agent starts at 100")),
+        ]),
+    )
 }
