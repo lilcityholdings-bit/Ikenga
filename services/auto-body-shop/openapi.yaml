@@ -1,332 +1,388 @@
 openapi: 3.0.3
 info:
-  title: Auto Body Shop - Enterprise Staging Platform API
+  title: Auto Body Shop - Repair Market for AI Agents
+  version: 2.0.0
   description: >-
-    Continuous Integration, Shadow Staging, and Hot-Swap Deployment Engine for Autonomous AI
-    Agents. Implemented by server.py in this directory. Additions beyond the original contract
-    are marked "(extension)": optional admin key, 409/422 responses, the optional telemetry
-    `version` for shadow traces, and the candidates/versions/health endpoints.
-  version: 1.0.0
+    Verified production failures become bounties. Repair bots compete to fix them, scored on
+    hidden tests by a referee that is committed in advance. The payment and the fix are both
+    held in escrow until settlement. Part of the award is held back as a warranty until the fix
+    survives a live canary. Bots pay under mandates their owners set once. See README.md and
+    shop.py for the full mechanism.
+
+    Amounts are integer atomic units (1e-6 of the settlement asset, i.e. USDC's 6 decimals).
+    Errors are `{"detail": "..."}`. The four endpoints of the original 1.0 contract
+    (config, telemetry, approve, rollback) keep their request and response fields; they now
+    require an API key.
 servers:
-  - url: https://api.autobodyshop.io
-    description: Production Gateway
   - url: http://localhost:8090
-    description: Local (python3 server.py)
+security:
+  - Bearer: []
 components:
   securitySchemes:
+    Bearer:
+      type: http
+      scheme: bearer
+      description: >-
+        An API key. Owner keys (one per account at signup) can do everything, including set
+        mandates and withdraw. Bot keys (minted by an owner, optionally bound to one agent)
+        can only spend within a mandate.
     AdminKey:
       type: apiKey
       in: header
       name: X-Admin-Key
-      description: >-
-        (extension) Required on admin routes when the server is started with ABS_ADMIN_KEY;
-        mandatory in production (ABS_ENV=production refuses to start without it).
-  responses:
-    Unauthorized:
-      description: (extension) Missing or invalid X-Admin-Key.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    ValidationError:
-      description: (extension) Request body failed validation.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
   schemas:
-    AgentConfigResponse:
+    Error:
       type: object
       properties:
-        version:
-          type: string
-          example: v1.0.0
-        system_instruction:
-          type: string
-          example: Extract target entities into valid JSON strictly conforming to schema.
-    TelemetryPayload:
+        detail: {type: string}
+    Config:
       type: object
-      required:
-        - agent_id
-        - latency_ms
-        - success
+      required: [system_instruction]
+      description: Everything that defines an agent's behaviour, versioned and rolled back as one unit.
       properties:
-        agent_id:
-          type: string
-          example: bot_alpha
-        latency_ms:
-          type: number
-          format: float
-          minimum: 0
-          example: 245.5
-        success:
-          type: boolean
-          example: true
-        version:
-          type: string
+        system_instruction: {type: string}
+        model: {type: string, nullable: true, example: claude-sonnet-5}
+        params: {type: object, example: {max_tokens: 4096, effort: medium}}
+        tools: {type: array, items: {type: object}}
+        examples:
+          type: array
+          items: {type: object, properties: {input: {type: string}, output: {type: string}}}
+    Contract:
+      type: object
+      description: >-
+        Checked server-side against every trace's output. json_schema supports: type,
+        properties, required, additionalProperties (bool), items, enum, const, minLength,
+        maxLength, pattern, minimum, maximum, minItems, maxItems. Unknown keywords are refused.
+      properties:
+        type: {type: string, enum: [none, json_schema, regex]}
+        schema: {type: object}
+        pattern: {type: string}
+    Policy:
+      type: object
+      properties:
+        auto_bounty:
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/BountyTerms'}]
           description: >-
-            (extension) Version this trace ran against. Omit for live traffic (attributed to the
-            ACTIVE version). Set it to a STAGED version for shadow runs, so candidates collect
-            their own metrics before anyone approves them. Shadow traces are never fed to the
-            optimizer as evidence about the live version.
-          example: v1726800000
+            When set, the agent posts its own bounty once `min_failures` unassigned verified
+            failures accumulate, paid under a `bounty` mandate. If no mandate covers it, an
+            `auto_bounty_blocked` event records why.
+        auto_promote: {type: boolean, description: Start a canary automatically when a repair wins.}
+        canary:
+          type: object
+          properties:
+            fraction: {type: number, minimum: 0.01, maximum: 0.5}
+            min_samples: {type: integer, minimum: 30}
+            duration_s: {type: number}
+    BountyTerms:
+      type: object
+      required: [amount]
+      properties:
+        amount: {type: integer, description: Maximum reward, escrowed on posting.}
+        threshold: {type: number, default: 0.5, description: 'Fraction of hidden failures a fix must repair for the full award; the award scales linearly below it.'}
+        warranty_bps: {type: integer, default: 3000, description: Share of the net award held back until the fix proves itself live.}
+        duration_s: {type: number, default: 86400}
+        warranty_s: {type: number, default: 604800}
+        max_submissions: {type: integer, default: 3, description: Per repairer account.}
+        share_config: {type: boolean, default: true, description: Show repairers the current config.}
+        min_failures: {type: integer, description: auto_bounty only.}
+    Mandate:
+      type: object
+      required: [purpose, max_per_tx, max_per_day]
+      properties:
+        purpose: {type: string, enum: [bounty, eval_fee, any]}
+        agent_id: {type: string, nullable: true, description: Restrict to one agent's payments.}
+        max_per_tx: {type: integer}
+        max_per_day: {type: integer, description: Rolling 24h.}
+        ttl_s: {type: number, default: 2592000}
     ActionPayload:
       type: object
-      required:
-        - agent_id
-        - version
+      required: [agent_id, version]
       properties:
-        agent_id:
-          type: string
-          example: bot_alpha
-        version:
-          type: string
-          description: >-
-            For approve, the STAGED candidate to promote. For rollback, the currently ACTIVE
-            version being rolled back; a mismatch returns 409 instead of demoting whatever
-            happens to be live.
-          example: v1726800000
-    CandidatePayload:
-      type: object
-      required:
-        - agent_id
-        - system_instruction
-      properties:
-        agent_id:
-          type: string
-          example: bot_alpha
-        system_instruction:
-          type: string
-          example: Extract target entities into valid JSON strictly conforming to schema.
-    ErrorResponse:
-      type: object
-      properties:
-        detail:
-          type: string
-          example: Resource not found
+        agent_id: {type: string, example: bot_alpha}
+        version: {type: string, example: v1726800000}
 paths:
+  /:
+    get:
+      summary: Service description
+      security: []
+      responses: {'200': {description: OK}}
+  /health:
+    get:
+      summary: Liveness plus the ledger invariant (all balances sum to zero; 503 if not)
+      security: []
+      responses: {'200': {description: OK}, '503': {description: Ledger invariant broken}}
+
+  /v1/accounts:
+    post:
+      summary: Create an account (self-service; rate-limited per IP)
+      security: []
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses:
+        '201': {description: '{account_id, key_id, owner_key}. The key is shown once.'}
+        '429': {description: Too many signups from this address}
+  /v1/accounts/me:
+    get:
+      summary: Balance, keys, mandates and agents of the calling account
+      responses: {'200': {description: OK}}
+  /v1/accounts/{account_id}/reputation:
+    get:
+      summary: Public track record (wins, awards, warranties released or refunded)
+      security: []
+      parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
+  /v1/keys:
+    post:
+      summary: Mint a bot key (owner key required)
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {agent_id: {type: string}, label: {type: string}}}}}
+      responses: {'200': {description: '{key_id, key, scope, agent_id}'}}
+  /v1/keys/{key_id}/revoke:
+    post:
+      summary: Revoke a key
+      parameters: [{name: key_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
+  /v1/mandates:
+    post:
+      summary: Authorise bot spending, once (owner key required)
+      requestBody:
+        content: {application/json: {schema: {$ref: '#/components/schemas/Mandate'}}}
+      responses: {'200': {description: The mandate with its terms_hash}}
+  /v1/mandates/{mandate_id}/revoke:
+    post:
+      summary: Revoke a mandate
+      parameters: [{name: mandate_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
+
+  /v1/agents:
+    post:
+      summary: Register an agent with its first config, contract and policy (owner key)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, config]
+              properties:
+                agent_id: {type: string}
+                config: {$ref: '#/components/schemas/Config'}
+                contract: {$ref: '#/components/schemas/Contract'}
+                policy: {$ref: '#/components/schemas/Policy'}
+      responses:
+        '201': {description: '{agent_id, version, agent_key}. agent_key is a bot key bound to this agent.'}
+        '409': {description: agent_id taken}
+  /v1/agents/{agent_id}:
+    post:
+      summary: Update contract and/or policy (owner key)
+      parameters: [{name: agent_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
+  /v1/agents/{agent_id}/events:
+    get:
+      summary: Audit log (bounties, settlements, canary decisions, warranty outcomes, blocked payments)
+      parameters:
+        - {name: agent_id, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, schema: {type: integer}}
+      responses: {'200': {description: OK}}
+
   /v1/config/{agent_id}:
     get:
       summary: Fetch Active Configuration
-      description: Returns the currently approved, active system instruction for a production agent.
+      description: >-
+        Returns the config this call should run. With `session`, a running canary routes a sticky
+        hash-bucketed fraction of sessions to the candidate. Without it, always the baseline.
+        Supports If-None-Match (304). Use client.py, which caches the last good config and keeps
+        serving it if this service is unreachable.
       operationId: getActiveConfig
       parameters:
-        - name: agent_id
-          in: path
-          required: true
-          description: Unique identifier for the agent (e.g., bot_alpha).
-          schema:
-            type: string
+        - {name: agent_id, in: path, required: true, schema: {type: string}}
+        - {name: session, in: query, schema: {type: string}}
       responses:
         '200':
-          description: Active configuration retrieved successfully.
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentConfigResponse'
-        '404':
-          description: No active configuration found for the specified agent.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
+                type: object
+                properties:
+                  version: {type: string}
+                  system_instruction: {type: string}
+                  config: {$ref: '#/components/schemas/Config'}
+                  fingerprint: {type: string}
+                  rollout: {type: object, nullable: true, properties: {id: {type: integer}, arm: {type: string, enum: [baseline, candidate]}}}
+        '304': {description: Not modified}
+        '404': {description: No active configuration found for the specified agent.}
   /v1/telemetry:
     post:
       summary: Ingest Agent Telemetry
       description: >-
-        Records live agent execution metrics. Automatically queues background staging
-        optimization upon reaching batch thresholds (every ABS_BATCH_SIZE traces per agent,
-        default 100). The optimizer only ever stages a candidate; it never promotes one.
+        One run of the agent. The verdict is decided server-side. A reported failure (success
+        false, or an error) is trusted. A reported success is not: the output is checked against
+        the agent's contract, and anyone other than the agent can grade it later with the returned
+        single-use feedback_token. Verified failures with an input become replayable cases.
       operationId: ingestTelemetry
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TelemetryPayload'
+              type: object
+              required: [agent_id, latency_ms, success]
+              properties:
+                agent_id: {type: string}
+                latency_ms: {type: number, minimum: 0}
+                success: {type: boolean}
+                version: {type: string, description: The version that ran (from get config). Defaults to ACTIVE.}
+                session: {type: string}
+                input: {type: string}
+                output: {type: string}
+                error: {type: string}
       responses:
         '200':
-          description: Telemetry successfully logged.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: INGESTED
-                  total_traces:
-                    type: integer
-                    description: Traces recorded for this agent so far.
-                    example: 200
-        '404':
-          description: (extension) `version` was given but does not exist for this agent.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          $ref: '#/components/responses/ValidationError'
-
-  /v1/approve:
-    post:
-      summary: Approve Staged Candidate Version
-      description: Promotes a staged prompt version to ACTIVE status and archives the previous active configuration.
-      operationId: approveStagingVersion
-      security:
-        - AdminKey: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ActionPayload'
-      responses:
-        '200':
-          description: Version promoted to active production environment.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: SUCCESS
-                  message:
-                    type: string
-                    example: Version v1726800000 promoted to production.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          description: Candidate build not found or invalid status.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          $ref: '#/components/responses/ValidationError'
-
-  /v1/rollback:
-    post:
-      summary: Emergency Rollback
-      description: >-
-        Demotes the current active configuration (to ROLLED_BACK, so a later rollback never
-        brings it back) and restores the last known archived stable version.
-      operationId: rollbackToPrevious
-      security:
-        - AdminKey: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ActionPayload'
-      responses:
-        '200':
-          description: Emergency rollback completed successfully.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ROLLED_BACK
-                  message:
-                    type: string
-                    example: Agent restored to last stable configuration.
-                  restored_version:
-                    type: string
-                    description: (extension) The version that is now ACTIVE.
-                    example: v1726700000
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          description: (extension) The agent has no active configuration.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
           description: >-
-            (extension) `version` is not the active version, or there is no archived version to
-            restore. Nothing is changed.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          $ref: '#/components/responses/ValidationError'
+            {status: INGESTED, total_traces, trace_id, version, verdict (fail|pass|unverified),
+            verdict_source (self_fail|contract|none), feedback_token}
+  /v1/feedback:
+    post:
+      summary: Grade a run, by its consumer or its owner (never the agent itself)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [feedback_token, verdict]
+              properties:
+                feedback_token: {type: string}
+                verdict: {type: string, enum: [pass, fail]}
+                expected: {description: The correct output. Makes a failure replayable.}
+                grader: {type: string, enum: [contract, equals, json_equals, contains, regex]}
+      responses:
+        '200': {description: Recorded}
+        '403': {description: The agent tried to grade itself}
+        '404': {description: Unknown or already-used token}
 
   /v1/candidates:
     post:
-      summary: (extension) Stage a Candidate Manually
-      description: >-
-        Stages a hand-written system instruction. This is also how an agent gets its first
-        configuration: stage it, then approve it.
-      operationId: stageCandidate
-      security:
-        - AdminKey: []
+      summary: Stage a config by hand (owner key)
+      responses: {'201': {description: '{status: STAGED, version}'}}
+  /v1/approve:
+    post:
+      summary: Approve Staged Candidate Version
+      operationId: approveStagingVersion
+      requestBody: {content: {application/json: {schema: {$ref: '#/components/schemas/ActionPayload'}}}}
+      responses:
+        '200': {description: '{status: SUCCESS, message}'}
+        '404': {description: Candidate build not found or invalid status.}
+  /v1/rollback:
+    post:
+      summary: Emergency Rollback
+      description: '`version` must be the currently active version (409 otherwise), so a stale rollback cannot demote a newer fix.'
+      operationId: rollbackToPrevious
+      requestBody: {content: {application/json: {schema: {$ref: '#/components/schemas/ActionPayload'}}}}
+      responses:
+        '200': {description: '{status: ROLLED_BACK, message, restored_version}'}
+        '409': {description: Stale version, or nothing archived to restore}
+  /v1/versions/{agent_id}:
+    get:
+      summary: Versions with verified failure rates, rollouts with their statistics, and case counts
+      parameters: [{name: agent_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
+  /v1/rollouts/{agent_id}:
+    post:
+      summary: Start a canary for a staged version by hand (owner key)
+      parameters: [{name: agent_id, in: path, required: true, schema: {type: string}}]
       requestBody:
-        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [version], properties: {version: {type: string}, fraction: {type: number}, min_samples: {type: integer}, duration_s: {type: number}}}
+      responses: {'201': {description: Rollout started}}
+
+  /v1/bounties:
+    get:
+      summary: List bounties (public)
+      security: []
+      parameters: [{name: status, in: query, schema: {type: string, default: OPEN}}]
+      responses: {'200': {description: OK}}
+    post:
+      summary: Post a bounty for an agent's unassigned verified failures
+      description: >-
+        Needs an owner key, or a bot key covered by a `bounty` mandate. The reward and the
+        baseline scoring fee are debited in one step, and the whole reward is escrowed. The
+        response carries the commitment hash. Status is PREPARING while the referee scores the
+        current config, then OPEN.
+      requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CandidatePayload'
+              allOf: [{$ref: '#/components/schemas/BountyTerms'}, {type: object, required: [agent_id], properties: {agent_id: {type: string}}}]
       responses:
-        '201':
-          description: Candidate staged.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: STAGED
-                  version:
-                    type: string
-                    example: v1726800000
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '422':
-          $ref: '#/components/responses/ValidationError'
-
-  /v1/versions/{agent_id}:
+        '201': {description: '{bounty_id, status, commitment, terms, baseline_fee, mandate_id}'}
+        '402': {description: Insufficient balance}
+        '403': {description: No mandate covers it (reason given)}
+        '409': {description: Already has an open bounty, or no failures to repair}
+        '503': {description: No referee runner configured}
+  /v1/bounties/{bounty_id}:
     get:
-      summary: (extension) Version History and Optimization Jobs
+      summary: Terms, commitment, visible cases and baseline config. After settlement, also the reveal (seed, hidden case hashes, baseline results, scores).
+      parameters: [{name: bounty_id, in: path, required: true, schema: {type: integer}}]
+      responses: {'200': {description: OK}}
+  /v1/bounties/{bounty_id}/submissions:
+    post:
+      summary: Submit a sealed candidate config
       description: >-
-        Every version with its status, provenance and per-version telemetry (trace count,
-        success rate, mean latency), plus every optimization job and its outcome. Use it to
-        compare a staged candidate's shadow metrics with the live version's before approving.
-      operationId: listVersions
-      security:
-        - AdminKey: []
-      parameters:
-        - name: agent_id
-          in: path
-          required: true
-          schema:
-            type: string
+        Pays the referee fee (cases × trials × fee_per_run): owner key, or bot key under an
+        `eval_fee` mandate. Refunded if the referee's runner fails on every case. The owner of
+        the bounty cannot submit, and cannot read any submission unless it wins.
+      parameters: [{name: bounty_id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [config], properties: {config: {$ref: '#/components/schemas/Config'}}}}}
       responses:
-        '200':
-          description: History for the agent (empty lists if unknown).
-          content:
-            application/json:
-              schema:
-                type: object
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /health:
+        '202': {description: '{submission_id, status: EVALUATING, fee, mandate_id}'}
+        '409': {description: Not open}
+        '429': {description: Submission limit reached}
+  /v1/submissions/{submission_id}:
     get:
-      summary: (extension) Liveness and Configuration
-      operationId: health
+      summary: The submitter's view. Visible-case results at once; hidden score only after settlement.
+      parameters: [{name: submission_id, in: path, required: true, schema: {type: integer}}]
+      responses: {'200': {description: OK}}
+
+  /v1/deposits/x402:
+    post:
+      summary: Top up a balance by paying over HTTP (x402 v2)
+      description: >-
+        Without PAYMENT-SIGNATURE: 402, with a base64 PaymentRequired in the PAYMENT-REQUIRED
+        header (and as the body). With it: the payload's `accepted` must equal the offered
+        requirements exactly. The facilitator verifies and settles; the balance is credited once
+        per on-chain transaction; the settlement comes back in PAYMENT-RESPONSE. Requires
+        ABS_REAL_MONEY=1.
+      parameters:
+        - {name: PAYMENT-SIGNATURE, in: header, schema: {type: string}}
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [amount], properties: {amount: {type: integer}}}}}
       responses:
-        '200':
-          description: Server is up.
-          content:
-            application/json:
-              schema:
-                type: object
+        '200': {description: Credited}
+        '402': {description: Payment required, or rejected}
+        '403': {description: Real money disabled}
+        '409': {description: Payment already credited}
+  /v1/withdrawals:
+    post:
+      summary: Request a payout (owner key; real-money mode). Funds are held until the operator marks it PAID or FAILED.
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [amount, destination], properties: {amount: {type: integer}, destination: {type: string}}}}}
+      responses: {'202': {description: PENDING}}
+
+  /v1/admin/grants:
+    post:
+      summary: Grant play credits (play-money mode only)
+      security: [{AdminKey: []}]
+      responses: {'200': {description: OK}}
+  /v1/admin/withdrawals/{withdrawal_id}:
+    post:
+      summary: Mark a withdrawal PAID or FAILED (FAILED returns the funds)
+      security: [{AdminKey: []}]
+      parameters: [{name: withdrawal_id, in: path, required: true, schema: {type: integer}}]
+      responses: {'200': {description: OK}}
+  /v1/admin/ledger:
+    get:
+      summary: All balances and their sum (always 0)
+      security: [{AdminKey: []}]
+      responses: {'200': {description: OK}}

@@ -83,10 +83,13 @@ Implemented and running today:
   everything; IPs are visible; timing correlation still works). Read `src/privacy.rs`'s threat
   model before relying on any of it.
 
-- **Auto Body Shop** (`services/auto-body-shop/`) — a separate stdlib-Python service that
-  stages, approves and rolls back AI agents' system instructions from live telemetry (spec in its
-  `openapi.yaml`). The optimizer only ever stages; promotion is always an explicit approve. See its
-  README; `python3 test_server.py` runs its tests with no setup.
+- **Auto Body Shop** (`services/auto-body-shop/`): a repair market for AI agents. Verified
+  production failures become bounties; repair bots compete on hidden, committed-in-advance tests.
+  Payment and the fix are both escrowed until settlement (so neither side can cheat the other),
+  and part of the award rides on a live canary. Bots on both sides pay under owner-set spending
+  mandates, and top up over x402, with no per-payment human approval. Play credits only unless
+  `ABS_REAL_MONEY=1`. Reference repair bot in `bots/repair-bot/`. Read its README;
+  `python3 test_server.py` runs 25 end-to-end tests with no setup.
 
 Stubbed with clear interfaces, not implemented (see `docs/ROADMAP.md` + `docs/COMPLIANCE-NOTES.md`
 for why these aren't just "more code"):

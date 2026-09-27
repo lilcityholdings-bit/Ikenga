@@ -1,100 +1,188 @@
 # Auto Body Shop
 
-Staging, approval and rollback for AI agents' system instructions: the API in
-[`openapi.yaml`](openapi.yaml). Agents fetch their live instruction and report telemetry. Every
-batch of telemetry queues an optimizer that may **stage** a revised instruction. A human (or
-your own eval gate) **approves** it into production and can **roll it back** instantly.
-
-It uses only the Python standard library (`http.server` + `sqlite3`), like the rest of this repo. The
-exception is the optional Claude optimizer, which needs the `anthropic` package.
-
-## Run it
+**A repair market for AI agents.** An agent's verified production failures become a bounty.
+Repair bots compete to fix them, scored on hidden tests by a referee that published a commitment
+to those tests in advance. Both the payment *and the fix* sit in escrow until the fix is proven.
+Part of the award rides on the fix surviving live traffic. Bots on both sides pay under limits
+their owners set once, and nobody approves individual payments.
 
 ```bash
 cd services/auto-body-shop
-ABS_ADMIN_KEY=$(openssl rand -hex 32) python3 server.py    # :8090, state in data/autobodyshop.db
-python3 test_server.py                                    # 13 end-to-end tests, no setup
+python3 test_server.py                         # 25 end-to-end tests, stdlib only, no setup
+ABS_ADMIN_KEY=$(openssl rand -hex 32) ABS_RUNNER=command ABS_RUNNER_CMD="python3 my_agent_runner.py" \
+  python3 server.py                            # :8090
 ```
 
-Or from the repo root: `docker compose up auto-body-shop`.
+## The problem
 
-## Walkthrough
+Agents fail in production, and fixing them is skilled, slow work that most teams do by hand: read
+logs, tweak the prompt, hope. There are good tools for *seeing* failures (tracing platforms) and
+for *optimizing* prompts against a dataset you already have (DSPy/GEPA). What doesn't exist is a
+way to **hand the repair to someone else, human or bot, and pay them only if it worked**.
+That breaks down on four trust problems. Existing tools solve none of them, because they
+assume the person fixing the agent is the person who owns it:
 
-```bash
-H='-H Content-Type:application/json -H X-Admin-Key:'$ABS_ADMIN_KEY
-# An agent's first configuration: stage it, then approve it.
-curl -s $H localhost:8090/v1/candidates -d '{"agent_id":"bot_alpha","system_instruction":"Extract entities as JSON."}'
-#   {"status": "STAGED", "version": "v1726800000"}
-curl -s $H localhost:8090/v1/approve -d '{"agent_id":"bot_alpha","version":"v1726800000"}'
-curl -s localhost:8090/v1/config/bot_alpha            # what the agent loads at startup
-curl -s -H Content-Type:application/json localhost:8090/v1/telemetry \
-     -d '{"agent_id":"bot_alpha","latency_ms":245.5,"success":true}'
-curl -s $H localhost:8090/v1/versions/bot_alpha       # history, per-version metrics, optimizer jobs
-curl -s $H localhost:8090/v1/rollback -d '{"agent_id":"bot_alpha","version":"<the active version>"}'
+1. **Whose word counts?** Agents report their own success, and the failures that matter
+   (well-formed but wrong output) get reported as success.
+2. **Teaching to the test.** A repairer who can see every test case can overfit to them.
+3. **Arrow's information paradox.** The owner can't judge a fix without seeing it. But a fix is a
+   prompt, which is pure copyable text: once seen, there's no reason to pay for it.
+4. **Test-passing isn't production-passing.** A fix can ace the test set and still make things
+   worse on real traffic.
+
+## What this does about each
+
+| Problem | Mechanism | Where |
+|---|---|---|
+| Self-reported success | Reported failures are trusted (nobody lies to look worse), reported successes are not. Every output is checked server-side against the agent's declared contract. Anyone *except the agent* can grade a run with a single-use feedback token. | `shop.ingest`, `shop.feedback`, `contracts.py` |
+| Overfitting | Cases are split into visible and hidden by a seed. The terms, every case hash and the seed are committed (sha256) before anyone submits. Repairers get scores on visible cases only. Hidden scores stay secret until close, so resubmitting can't tune a fix to them. After close, the seed and hashes are revealed so anyone can recompute the commitment and the split. | `shop.open_bounty`, `bounty_view` |
+| Arrow's paradox | Submissions are sealed. The bounty owner can't read any of them, and gets only the winner's, at the same moment the repairer is paid. The money was escrowed when the bounty was posted, so the repairer can't be stiffed and the owner can't peek and walk away. | `shop.submit`, `_settle` |
+| Test ≠ production | Part of the award (the *warranty*, 30% by default) is held back while the fix runs as a sticky canary on a slice of live sessions. A one-sided two-proportion z-test on verified failures promotes it or rolls it back automatically. | `_decide_rollout`, `_resolve_warranty` |
+| Owner fakes canary failures to claw back the warranty | A rollback only opens a *claim*. The referee re-runs the failing live inputs on both the fix and the old version, and refunds only if the harm reproduces. Deployment safety still wins: the canary is rolled back either way. The money follows reproducible evidence. | `_run_warranty` |
+| Fixes that break other things | Guards (a sample of verified passes) and *regressions* (every failure a past repair fixed) are hidden must-pass cases. A single regression makes a submission ineligible. Each repair raises the bar for the next. | `_settle` |
+| Junk submissions | Every submission pays the referee's model costs up front. It's refunded only if the referee itself breaks. | `submit`, `_evaluate` |
+
+Pricing is **no cure, no pay**, as in marine salvage. Award = reward × min(fixed, required) /
+required, where `required` = ⌈threshold × hidden failures⌉. That comes to zero for no fixes, full for
+hitting the committed target, and linear in between. Failures the old version *also* passes on
+re-run (flaky ones) are excluded, so a repairer isn't paid for noise.
+
+## How bots pay without a human approving each payment
+
+A human signs off **once**, on a *mandate*: "this account's bots may spend up to X per payment
+and Y per rolling 24 hours, for this purpose, for this agent, until this date". That is AP2's
+intent-mandate idea applied here. After that:
+
+- **The broken agent pays for its own repair.** With `auto_bounty` in its policy, when enough
+  new verified failures pile up the agent posts a bounty itself, paid under a `bounty` mandate.
+- **Repair bots pay their referee fees** from their own balance under an `eval_fee` mandate.
+- **Bots top themselves up over HTTP** with x402 v2 (`POST /v1/deposits/x402`): 402 +
+  `PAYMENT-REQUIRED`, then a signed `PAYMENT-SIGNATURE`, which a facilitator verifies and settles.
+- **Settlement, the warranty and refunds are automatic.** The rules were fixed when the
+  bounty was posted.
+
+Every automated debit is checked against a live mandate *inside the same database transaction*
+that moves the money, so two concurrent payments can't both slip under a daily cap. A payment
+outside every mandate is **refused, never queued for approval**, and the exact reason ("would
+bring 24h spend to 18,000, over max_per_day 15,000") goes into the agent's event log. Owner keys
+can spend without a mandate; bot keys never can, and can't write mandates or withdraw either.
+
+The ledger is double-entry with integer atomic units. `GET /health` returns 503 if the
+balances ever stop summing to zero, and every money test asserts that they do.
+
+## Prior art, and what's new
+
+Each ingredient exists; the combination is what I couldn't find anywhere:
+
+- Bounty marketplaces where agents do work paid from escrow on verification already exist
+  ([Bounty](https://trybounty.ai/), backed by a16z). Verification there is against criteria the
+  poster writes, with a review step. There is no hidden-test commitment, no sealed artifact,
+  and no production warranty.
+- Spending mandates for autonomous agents: [AP2](https://ap2-protocol.org/) (Google/Coinbase,
+  now at the FIDO Alliance). HTTP-native agent payments: [x402](https://github.com/coinbase/x402)
+  (Linux Foundation's x402 Foundation since 2026). This service uses both ideas rather than
+  inventing its own.
+- Prompt optimization from failures: [GEPA / DSPy](https://huggingface.co/learn/cookbook/en/dspy_gepa).
+  Canary with auto-rollback for agents: e.g. [agent-canary](https://github.com/mizcausevic-dev/agent-canary).
+  Held-out private test sets: every Kaggle competition.
+- Escrow to get around Arrow's paradox in information markets:
+  [Rahaman et al., 2024](https://arxiv.org/abs/2403.14443).
+
+What's new here is putting them together for one job, **outsourcing the repair of a live
+agent to untrusted parties**. That means verified production failures as the test set,
+commit-reveal scoring, a sealed fix released atomically on payment, and a warranty settled by
+reproducing the harm, with every payment made by bots under mandates. I searched for this
+combination and didn't find it. That's not proof it doesn't exist.
+
+## Using it
+
+**Owner (once):** `POST /v1/accounts` → owner key. `POST /v1/agents` with the config, the output
+contract and the policy → agent key. `POST /v1/mandates` to let the agent fund its own repairs.
+Fund the account.
+
+**Agent (every run):** use `client.py`. It caches the config on disk with ETag revalidation and
+keeps serving the last good one if the shop is unreachable, so this service is never in your
+agent's critical path. Telemetry goes out on a background thread and is dropped, never retried
+forever, if the shop is down.
+
+```python
+shop = Client(URL, key=AGENT_KEY, agent_id="bot_alpha")
+cfg = shop.get_config(session=conversation_id)
+out = run_agent(cfg["config"], user_input)
+shop.report(cfg, input=user_input, output=out, latency_ms=ms, success=True, session=conversation_id)
 ```
 
-## How versions move
+**Repair bot:** `bots/repair-bot/repair_bot.py` is a working reference. It gates each bounty on
+expected value, proposes with Claude (or any command), and revises on visible feedback.
 
-```
-STAGED ──approve──▶ ACTIVE ──(next approve)──▶ ARCHIVED ──rollback──▶ ACTIVE
-                      └──rollback──▶ ROLLED_BACK   (never restored by a later rollback)
-```
-
-- Each agent has **exactly one ACTIVE version**. A unique index in SQLite enforces this as well as the code.
-- **Rollback names the version it demotes.** If that version is no longer the active one, the
-  call returns 409 and changes nothing. A late rollback can't knock out a fix someone just approved.
-- **Every write is committed to SQLite (`synchronous=FULL`) before the response.** The tests
-  `kill -9` the server and check that versions, telemetry and staged candidates all come back.
-  Optimizer jobs cut off mid-run are re-queued at startup.
-
-## The optimizer
-
-Every `ABS_BATCH_SIZE` traces for an agent (default 100), a background job is queued. It collects
-that batch's success rate and latency (mean/p50/p95), counting only traces that ran on the
-ACTIVE version, then asks the configured optimizer for a revised instruction:
-
-| `ABS_OPTIMIZER` | What happens |
-|---|---|
-| `none` (default) | Job recorded as `SKIPPED`. Nothing is staged automatically. |
-| `command` | Runs `ABS_OPTIMIZER_CMD`. The job context goes to stdin as JSON; stdout becomes the candidate. Use this to plug in your own eval harness or model. |
-| `claude` | Calls Claude through the `anthropic` SDK (`ABS_CLAUDE_MODEL`, default `claude-opus-5`, with server-side refusal fallback). Credentials come from `ANTHROPIC_API_KEY`. |
-
-Every job ends as `STAGED`, `SKIPPED` (no active config, no change proposed, no optimizer) or
-`FAILED` (with the error). You can see it under `GET /v1/versions/{agent_id}`.
-
-**The optimizer never promotes anything, on purpose.** Telemetry holds only latency and a success
-flag. There are no inputs, outputs or error messages, so any optimizer is working from thin evidence.
-Treat its output as a proposal. To get real evidence before approving, run the candidate on shadow
-traffic and report those traces with `"version": "<candidate>"` on `/v1/telemetry`.
-`/v1/versions` then shows the candidate's own success rate and latency next to the live version's.
-Shadow traces never count as evidence about the live version.
+**Referee runner:** bounties refuse to open until the referee can actually run the agent.
+`ABS_RUNNER=command` runs your own code path (the most faithful option). `ABS_RUNNER=claude`
+calls Claude with the config's own model and no fallback to a different one, because an eval must
+run what production runs. With `claude`, tools are sent but not executed; tool-using agents
+should use `command`.
 
 ## Configuration
 
 | Variable | Default | |
 |---|---|---|
-| `ABS_PORT` / `ABS_HOST` | `8090` / `0.0.0.0` | |
-| `ABS_DB` | `data/autobodyshop.db` | SQLite file; mount a volume on its directory. |
-| `ABS_ADMIN_KEY` | unset | Required as `X-Admin-Key` on approve, rollback, candidates and versions. Agents' config fetch and telemetry don't need it. |
-| `ABS_ENV` | unset | `production` refuses to start without `ABS_ADMIN_KEY`. |
-| `ABS_BATCH_SIZE` | `100` | Traces per optimization batch, per agent. |
-| `ABS_OPTIMIZER`, `ABS_OPTIMIZER_CMD`, `ABS_OPTIMIZER_TIMEOUT`, `ABS_CLAUDE_MODEL` | | See above. |
-| `ABS_ACCESS_LOG` | unset | `1` logs every request. |
+| `ABS_PORT`, `ABS_HOST`, `ABS_DB` | `8090`, `0.0.0.0`, `data/autobodyshop.db` | |
+| `ABS_ADMIN_KEY` | unset | Needed for grants, withdrawal payouts and `/v1/admin/ledger`. `ABS_ENV=production` refuses to start without it. |
+| `ABS_RUNNER`, `ABS_RUNNER_CMD`, `ABS_RUNNER_TIMEOUT` | `none` | The referee's runner, see above. |
+| `ABS_FEE_PER_RUN` | `2000` | Referee fee per case run, in atomic units ($0.002 in USDC). Set it at or above your model cost. |
+| `ABS_TAKE_BPS` | `1000` | Platform share of each award (10%). |
+| `ABS_EVAL_TRIALS` | `1` | Runs per case (odd); majority vote damps model nondeterminism. |
+| `ABS_VISIBLE_FRACTION` | `0.5` | Share of each case group published to repairers. |
+| `ABS_MAX_FAILURES`, `ABS_MAX_GUARDS`, `ABS_GUARD_EVERY` | `100`, `50`, `10` | Bounty size, and every Nth verified pass sampled as a guard. |
+| `ABS_WARRANTY_SAMPLE` | `20` | Live failures re-run to verify a warranty claim. |
+| `ABS_REAL_MONEY` | unset | See below. |
+| `ABS_X402_FACILITATOR_URL`, `ABS_X402_PAY_TO`, `ABS_X402_NETWORK`, `ABS_X402_ASSET`, `ABS_X402_EXTRA`, `ABS_PUBLIC_URL` | Base mainnet USDC | x402 deposit terms. |
+| `ABS_RATE_PER_MIN`, `ABS_SIGNUPS_PER_HOUR`, `ABS_TRUST_PROXY` | `1200`, `20`, unset | Per-key limit; per-IP signup limit; trust `X-Forwarded-For`. |
+| `ABS_TICK_S`, `ABS_CONFIG_MAX_AGE`, `ABS_MAX_FIELD_BYTES` | `5`, `30`, `65536` | |
 
-## Additions to the original contract
+**Money.** Off by default, following the same wall as the matching engine's
+`IKENGA_REAL_MONEY`. Without `ABS_REAL_MONEY=1` the only money is admin-granted play credits,
+which can't be withdrawn. With it, grants are disabled (every unit must come from an x402
+deposit), and withdrawals become requests the operator pays out and marks by hand. Holding one
+party's money to pay another is money transmission: read `docs/COMPLIANCE-NOTES.md` first.
 
-These are marked "(extension)" in `openapi.yaml`:
+## Trust boundaries you should know about
 
-- An admin key, since approve and rollback with no auth would let anyone change production prompts.
-- 409 responses on rollback and 422 validation errors.
-- An optional `version` field on telemetry, for shadow traces.
-- `POST /v1/candidates`. The original contract had no way to create an agent's *first* configuration.
-- `GET /v1/versions/{agent_id}` and `GET /health`.
+- **The referee is the operator.** It picks the seed, runs the model and grades. The commitment
+  stops it from changing cases, terms or the split after the fact. It doesn't stop a dishonest
+  operator from, say, grinding seeds before publishing, or running a model badly. A trustless
+  referee would need attested execution (e.g. a TEE), which is out of scope.
+- **Visible cases are published.** Their inputs come from your production traffic. Don't put
+  personal data in traces you let become bounty cases, or post bounties with a contract grader only.
+- **Owners supply the cases.** An owner could pad a bounty with impossible "failures" to raise
+  `required` and shrink the award. The split is random, so repairers see a fair sample of what
+  they'll be scored on and can price that in. Public reputation (`/v1/accounts/{id}/reputation`)
+  makes a habit of it visible.
+- **The canary rolls back on owner-reported telemetry.** That's intentional (safety first); only
+  the *warranty money* needs reproducible evidence.
+- **Scale:** one process, one SQLite file, one referee thread. Fine for many agents at modest
+  volume; not a multi-node deployment. Traces are kept forever; add pruning before that bites.
 
-## Not done
+## What's verified, and what isn't
 
-- **Scale:** there is one process, one SQLite file, and one optimizer job at a time. That's fine for
-  thousands of agents at modest telemetry rates. It is not a multi-node deployment.
-- **Retention:** telemetry is kept forever. Add pruning before it becomes a problem.
-- **The Docker image hasn't been built yet.** It was written without a Docker daemon available.
-  The Python it runs is what the tests cover.
+Verified by `test_server.py` (25 tests, real HTTP):
+- The full loop, with no human approving anything.
+- Commitment and split recomputed from the reveal.
+- Exact payout arithmetic, with the ledger summing to zero after every money test.
+- Mandate caps, expiry and revocation.
+- Sealed submissions, and a cheater that fixes failures but breaks a guard being paid nothing.
+- Canary promote and rollback.
+- Warranty refunded on real harm and kept by the repairer on forged failures.
+- Fee refund when the referee breaks.
+- x402 402 → verify → settle → credit, with requirement mismatch, rejection and double-credit all refused.
+- The play/real money barrier.
+- Signup rate limits.
+- The client keeping an agent running with the shop down.
+- `kill -9` recovery mid-bounty.
+
+Not verified here:
+- The Docker image was never built; the build environment had no Docker daemon. It was tested
+  by running from a directory holding only the files the Dockerfile copies.
+- The Claude runner and the repair bot's Claude proposer were checked against the real
+  `anthropic` SDK (1.8.0), pointed at a local stand-in API, not against the live API.
+- x402 was tested against a simulated facilitator that follows the published v2 request and
+  response shapes, not a live one on-chain.

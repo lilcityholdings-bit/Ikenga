@@ -1,10 +1,10 @@
-# Stdlib-only Python service; `anthropic` is installed so ABS_OPTIMIZER=claude works out of the box,
-# but nothing imports it unless that optimizer is selected.
+# Stdlib-only Python service. `anthropic` is installed so ABS_RUNNER=claude works out of the box,
+# but nothing imports it unless that runner is selected.
 FROM python:3.12-slim
 RUN pip install --no-cache-dir anthropic \
     && useradd --system --create-home --home-dir /app abs
 WORKDIR /app
-COPY server.py optimizer.py openapi.yaml ./
+COPY server.py shop.py ledger.py payments.py contracts.py runners.py db.py client.py openapi.yaml ./
 COPY entrypoint.sh ./
 # State lives in SQLite at /app/data/autobodyshop.db — mount a volume here to keep it. No
 # `USER abs`: entrypoint.sh fixes the volume's ownership at start, then drops to `abs`.

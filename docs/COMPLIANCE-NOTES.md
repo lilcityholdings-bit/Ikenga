@@ -52,6 +52,20 @@ system the full spec describes. Fine for a single operator; not a substitute for
 access control once more than one person needs owner-level access, which is itself a security
 question worth answering deliberately rather than by sharing a key.
 
+## Auto Body Shop escrow (`services/auto-body-shop`)
+
+The repair market holds a bounty poster's money in escrow and then pays it to a *different*
+party (the winning repairer), with the operator keeping a fee. With real funds, that's
+receiving money from one person to transmit it to another, which is regulated money
+transmission in most jurisdictions. The same applies to letting repairers withdraw earnings.
+
+So it follows the same wall as `credits.rs`. `ABS_REAL_MONEY` is off by default, and in that
+mode the only money is admin-granted play credits, which can't be withdrawn. Turning it on
+disables grants (every unit must then come from a real x402 deposit) and enables withdrawal
+*requests*, which the operator pays out by hand. Do that only with a licensed partner or licence,
+KYC on the parties who can withdraw, and sanctions screening on payout destinations. Mandates
+limit what a bot can spend; they are not a substitute for any of this.
+
 ## What's already load-bearing, not just planned
 
 Two things in this repo exist specifically so that the items above can be evaluated honestly

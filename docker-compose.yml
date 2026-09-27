@@ -30,12 +30,14 @@ services:
     volumes:
       - abs-data:/app/data
     environment:
-      # Set both for a real deployment — production mode refuses to start without the admin key,
-      # because otherwise anyone who can reach the port can approve or roll back prompts.
+      # Production mode refuses to start without the admin key.
       # - ABS_ENV=production
       # - ABS_ADMIN_KEY=<generate with: openssl rand -hex 32>
-      # ABS_OPTIMIZER: claude          # plus ANTHROPIC_API_KEY; default "none" stages nothing
-      ABS_BATCH_SIZE: "100"
+      # The referee must be able to run agents before any bounty can open:
+      # ABS_RUNNER: claude             # plus ANTHROPIC_API_KEY; or "command" + ABS_RUNNER_CMD
+      # Real money stays off (play credits only) until licensing is sorted, see docs/COMPLIANCE-NOTES.md:
+      # ABS_REAL_MONEY: "1"
+      ABS_TICK_S: "5"
     restart: unless-stopped
 
 volumes:
