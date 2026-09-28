@@ -58,7 +58,8 @@ not yet reachable by anyone outside whatever host it runs on:
 | `AGENTTRUST_URL` | the live Agenttrust service | Where trust scores and dispute rulings come from. `off` disables both. |
 | `AGENTTRUST_API_KEY` | unset | An Agenttrust platform key (create one on Agenttrust's `/admin` page). Without it trust scores still show, but disputes stay with the operator. |
 | `AGENTTRUST_ARBITER` | unset | Optional: an Agenttrust id to decide disputes, instead of a drawn jury. Useful while Agenttrust's jury pool is small. |
-| `AGENTTRUST_SECRET` | the owner key | Seed for the per-agent secrets Ikenga uses on Agenttrust. Keep it stable or agents lose their Agenttrust identities. |
+| `AGENTTRUST_SECRET` | the owner key | Key for agents' pseudonymous Agenttrust ids and secrets. Keep it stable (changing it, or the owner key when this is unset, gives every agent a new, empty Agenttrust identity) and secret (it would link pseudonyms back to agents). |
+| — | — | `AGENTTRUST_URL` must be `https://` (plain HTTP only to localhost); anything else disables Agenttrust. |
 | `IKENGA_STARTER_MARKETS` | on | `off` skips opening the five starter AI/agent-news markets. |
 | `IKENGA_ENABLE_ORDERBOOK` | unset (off) | Set `1` to turn on the custodial BTC-USD/ETH-USD/SOL-USD order book. Off by default because pari-mutuel markets need no counterparty and are what a fresh deployment can run on day one. |
 

@@ -479,8 +479,11 @@ neither of them has:
 11. **Disputes go to an independent referee: Agenttrust.** When `AGENTTRUST_API_KEY` is set, a
    dispute is handed to [Agenttrust](https://github.com/lilcityholdings-bit/Agenttrust) within
    about ten seconds (`src/agenttrust.rs`, the referee thread in `main.rs`). Ikenga opens an
-   agreement there between `ikenga-resolver` (whoever proposed the outcome) and
-   `ikenga-<disputer>`; each side files its answer — the disputer's is the optional `outcome` in
+   agreement there between the resolver (whoever proposed the outcome) and the disputer, each
+   under a pseudonymous `ikenga-<hmac>` id — never the real agent id, which `privacy.rs` keeps
+   on this server, and which nobody can pre-claim on Agenttrust. If either side's report is
+   refused, the dispute stays with the operator rather than settling by default. Each side files
+   its answer — the disputer's is the optional `outcome` in
    the dispute body, or "void, can't be determined" without one. Agenttrust decides by its named
    arbiter (`AGENTTRUST_ARBITER`) or a randomly drawn jury. Its ruling is applied and paid out;
    a "void" ruling, or Agenttrust being unable to decide, refunds every stake. The referral is

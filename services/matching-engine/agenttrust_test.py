@@ -94,8 +94,11 @@ try:
     create = next((b for p, b, _ in seen if p == "/v1/agreements"), None)
     check("an agreement was opened on Agenttrust", create is not None, seen)
     if create:
-        check("between the resolver and the disputer",
-              create["parties"] == ["ikenga-resolver", f"ikenga-{agent_b}"], create["parties"])
+        st, tb = call("GET", f"/v1/agents/{agent_b}/agenttrust")
+        check("between the resolver and the disputer's Agenttrust id",
+              len(create["parties"]) == 2 and create["parties"][1] == tb.get("agenttrust_id"), create["parties"])
+        check("and no real agent id is sent to Agenttrust",
+              not any(agent_a in json.dumps(b) or agent_b in json.dumps(b) for _, b, _ in seen), seen)
         check("in free play points", create["asset"] == "IKENGA_POINTS", create)
         check("with the platform key", seen[0][2] == "Bearer at_live_test", seen[0][2])
     reports = [b for p, b, _ in seen if p == "/v1/agreements/agr_1/report"]
@@ -108,9 +111,15 @@ try:
     st, t = call("GET", f"/v1/agents/{agent_a}/agenttrust")
     check("an agent's Agenttrust score is shown", st == 200 and t.get("score") == 104, t)
     check("with its level and profile link",
-          t.get("trust_level") == "fair" and t.get("profile_url", "").endswith(f"/trust/ikenga-{agent_a}"), t)
+          t.get("trust_level") == "fair" and t.get("profile_url", "").endswith("/trust/" + t.get("agenttrust_id", "?")), t)
+    check("under a pseudonym, not the agent's real id",
+          t.get("agenttrust_id", "").startswith("ikenga-") and agent_a not in t.get("agenttrust_id", ""), t)
     st, acct = call("GET", "/v1/account", seed=seed_a, agent_id=agent_a)
-    check("the account links to it", acct.get("agenttrust", {}).get("agenttrust_id") == f"ikenga-{agent_a}", acct.get("agenttrust"))
+    check("the account links to it", acct.get("agenttrust", {}).get("agenttrust_id") == t.get("agenttrust_id"), acct.get("agenttrust"))
+    st, _ = call("GET", "/v1/agents/agent_DOESNOTEXIST/agenttrust")
+    check("a made-up agent id is refused before any lookup", st == 404, st)
+    codes = [call("GET", f"/v1/agents/{agent_a}/agenttrust", _retries=1)[0] for _ in range(20)]
+    check("lookups are rate-limited per IP", 429 in codes, codes)
 finally:
     stop(proc)
     srv.shutdown()

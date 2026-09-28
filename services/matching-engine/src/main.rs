@@ -477,7 +477,7 @@ fn route(state: &Arc<AppState>, req: &http::Request) -> http::Response {
         ("GET", ["v1", "fees"]) => api::get_fee_schedule(&state, &req),
         ("GET", ["v1", "route"]) => api::get_route(&state, &req),
         ("POST", ["v1", "agents"]) => api::register_agent(&state, &req),
-        ("GET", ["v1", "agents", agent_id, "agenttrust"]) => api::get_agenttrust(&state, agent_id),
+        ("GET", ["v1", "agents", agent_id, "agenttrust"]) => api::get_agenttrust(&state, &req, agent_id),
         ("GET", ["v1", "markets"]) => api::list_markets(&state, &req),
         ("POST", ["v1", "markets"]) => api::create_market(&state, &req),
         ("GET", ["v1", "markets", market_id]) => api::get_market(&state, &req, market_id),

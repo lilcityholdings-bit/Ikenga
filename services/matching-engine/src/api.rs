@@ -666,7 +666,7 @@ pub fn get_account(state: &AppState, req: &Request) -> Response {
                 "agenttrust",
                 match state.agenttrust.profile_url(&agent_id) {
                     Some(url) => Json::obj(vec![
-                        ("agenttrust_id", Json::str(crate::agenttrust::agenttrust_id(&agent_id))),
+                        ("agenttrust_id", Json::str(state.agenttrust.agenttrust_id(&agent_id))),
                         ("score_url", Json::str(format!("/v1/agents/{agent_id}/agenttrust"))),
                         ("profile_url", Json::str(url)),
                     ]),
@@ -733,6 +733,10 @@ pub const POINTS_ASSET: &str = crate::credits::POINTS;
 pub const PUBLIC_READ_PER_SEC: u32 = 60;
 
 pub const FEED_REQUESTS_PER_SEC: u32 = 5;
+
+/// Per-IP ceiling on `GET /v1/agents/{id}/agenttrust`. Generous for a person loading a page; low
+/// enough that nobody can use this server to hammer Agenttrust.
+pub const AGENTTRUST_REQUESTS_PER_SEC: u32 = 5;
 
 /// How many markets `GET /v1/markets` returns by default, and the most it will return at all.
 /// Live markets come first, so the default comfortably covers everything actually bettable on
@@ -4485,7 +4489,11 @@ fn generate_id() -> String {
 
 /// `GET /v1/agents/{id}/agenttrust` — the agent's public Agenttrust trust score. No auth: the
 /// score is public on Agenttrust already, and showing it is the point.
-pub fn get_agenttrust(state: &AppState, agent_id: &str) -> Response {
+///
+/// Each uncached lookup costs a subprocess and an outbound call, so this is bounded three ways:
+/// only registered agents are looked up (a made-up id is refused before any work), answers are
+/// cached, and anonymous callers are rate-limited per IP.
+pub fn get_agenttrust(state: &AppState, req: &Request, agent_id: &str) -> Response {
     let at = &state.agenttrust;
     let Some(profile) = at.profile_url(agent_id) else {
         return err_response(
@@ -4493,12 +4501,28 @@ pub fn get_agenttrust(state: &AppState, agent_id: &str) -> Response {
             ApiError::new("AGENTTRUST_OFF", "Agenttrust is switched off on this deployment"),
         );
     };
-    let view = at.trust(agent_id, now_ms());
+    if state.agent_registry.get_pubkey(agent_id).is_none() {
+        return err_response(404, ApiError::new("UNKNOWN_AGENT", "no such agent"));
+    }
+    let now = now_ms();
+    if !state.rate_limit_disabled
+        && !state.ip_limiter.allow(
+            &format!("agenttrust:{}", req.client_ip()),
+            AGENTTRUST_REQUESTS_PER_SEC,
+            now,
+        )
+    {
+        return err_response(
+            429,
+            ApiError::new("RATE_LIMITED", "trust-score lookups are limited per IP; try again shortly"),
+        );
+    }
+    let view = at.trust(agent_id, now);
     Response::json(
         200,
         &Json::obj(vec![
             ("agent_id", Json::str(agent_id)),
-            ("agenttrust_id", Json::str(crate::agenttrust::agenttrust_id(agent_id))),
+            ("agenttrust_id", Json::str(at.agenttrust_id(agent_id))),
             ("reachable", Json::Bool(view.is_some())),
             (
                 "score",

@@ -19,10 +19,19 @@
 //! Everything sent to Agenttrust is denominated in free play points (`asset: "IKENGA_POINTS"`).
 //! No real money is held or moved by either service.
 //!
-//! Ikenga agents appear in Agenttrust as `ikenga-<agent id>`, so they can never collide with a
-//! bot registered there directly. Agenttrust identifies each bot by a claimed secret; Ikenga
-//! derives one per agent from `AGENTTRUST_SECRET` (or the owner key) with HMAC, so nothing
-//! extra is stored and the same agent always gets the same secret.
+//! Ikenga agents appear in Agenttrust as `ikenga-<pseudonym>`, where the pseudonym is an HMAC of
+//! the agent id under `AGENTTRUST_SECRET` (or the owner key). Two reasons:
+//!
+//! - **Privacy.** Agenttrust's trust profiles and audit feed are public. `privacy.rs` promises an
+//!   agent's real id never leaves this server, so it must not appear there — not as the id, and
+//!   not in evidence text.
+//! - **No squatting.** Agenttrust ids are claimed first-come by whoever presents a secret first.
+//!   A predictable id (`ikenga-<agent id>`, or a fixed resolver name) could be claimed by an
+//!   attacker beforehand, so Ikenga's report for that side would be refused and the other side
+//!   would win by default. An HMAC nobody else can compute can't be claimed in advance.
+//!
+//! Agenttrust identifies each bot by a claimed secret; Ikenga derives that from the same key, so
+//! nothing extra is stored and the same agent always gets the same id and secret.
 //!
 //! Like `liquidity.rs`, HTTP goes through the system `curl` — this build has no crates.io access.
 //! Requests are fed to curl on stdin as a config file, so API keys and per-agent secrets never
@@ -36,8 +45,11 @@ use std::sync::Mutex;
 use crate::json::{self, Json};
 
 pub const DEFAULT_URL: &str = "https://agenttrust-production-381e.up.railway.app";
-/// The Agenttrust identity of whoever proposed the outcome under dispute.
-pub const RESOLVER_ID: &str = "ikenga-resolver";
+/// Stands in for "whoever proposed the outcome under dispute" when deriving its Agenttrust id.
+/// Not a valid Ikenga agent id, so it can't collide with one.
+const RESOLVER_SEED: &str = "#resolver";
+/// Upper bound on cached trust lookups, so the cache can't be grown without limit.
+const TRUST_CACHE_MAX: usize = 10_000;
 /// How long a looked-up trust score is reused. Public lookups are rate-limited per IP on
 /// Agenttrust's side, and a score only moves when a settlement happens.
 const TRUST_CACHE_MS: i64 = 5 * 60 * 1000;
@@ -83,14 +95,21 @@ pub struct AgentTrust {
     pub pending: Mutex<HashMap<String, (String, Option<usize>, String)>>,
 }
 
-/// The id an Ikenga agent has on Agenttrust.
-pub fn agenttrust_id(agent_id: &str) -> String {
-    let clean: String = agent_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        .take(64)
-        .collect();
-    format!("ikenga-{clean}")
+/// Whether a string from Agenttrust (or replayed from the log) is safe to put in a URL path and
+/// a curl config line. Agreement ids look like `agr_12`; anything else is refused rather than
+/// escaped, because a newline or quote here would let the other side inject curl options.
+pub fn is_safe_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Agenttrust must be reached over HTTPS: the API key and per-agent secrets travel in the
+/// request. Plain HTTP is allowed only to this machine, for tests.
+fn url_allowed(u: &str) -> bool {
+    u.starts_with("https://")
+        || u.starts_with("http://127.0.0.1")
+        || u.starts_with("http://localhost")
 }
 
 impl AgentTrust {
@@ -98,7 +117,11 @@ impl AgentTrust {
         let raw = std::env::var("AGENTTRUST_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
         let base_url = match raw.trim() {
             "" | "off" | "0" => None,
-            u => Some(u.trim_end_matches('/').to_string()),
+            u if url_allowed(u) => Some(u.trim_end_matches('/').to_string()),
+            u => {
+                eprintln!("agenttrust: AGENTTRUST_URL {u} is not https:// — Agenttrust disabled");
+                None
+            }
         };
         let nonempty = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let secret_key = nonempty("AGENTTRUST_SECRET")
@@ -130,8 +153,21 @@ impl AgentTrust {
         self.base_url.is_some() && self.api_key.is_some()
     }
 
+    /// The pseudonymous id an Ikenga agent has on Agenttrust. See the module docs.
+    pub fn agenttrust_id(&self, agent_id: &str) -> String {
+        let mac = crate::crypto::hmac_sha256(
+            &self.secret_key,
+            format!("agenttrust-id:{agent_id}").as_bytes(),
+        );
+        format!("ikenga-{}", crate::crypto::hex_encode(&mac[..10]))
+    }
+
+    fn resolver_id(&self) -> String {
+        self.agenttrust_id(RESOLVER_SEED)
+    }
+
     pub fn profile_url(&self, agent_id: &str) -> Option<String> {
-        self.base_url.as_ref().map(|b| format!("{b}/trust/{}", agenttrust_id(agent_id)))
+        self.base_url.as_ref().map(|b| format!("{b}/trust/{}", self.agenttrust_id(agent_id)))
     }
 
     fn secret_for(&self, at_id: &str) -> String {
@@ -141,19 +177,31 @@ impl AgentTrust {
         ))
     }
 
-    /// One HTTP call. Returns (status, parsed body).
-    fn call(&self, method: &str, path: &str, body: Option<&Json>) -> Option<(u16, Json)> {
+    /// One HTTP call. Returns (status, parsed body). `with_key` sends the platform API key —
+    /// only for the calls that need it, so public lookups are never billed to the platform.
+    fn call(&self, method: &str, path: &str, body: Option<&Json>, with_key: bool) -> Option<(u16, Json)> {
         let base = self.base_url.as_ref()?;
+        // Every value lands inside a double-quoted curl config string. Quotes and backslashes
+        // are escaped; control characters (newlines above all) would end the line and start a
+        // new option, so any value containing one is refused outright.
+        if [base.as_str(), path].iter().any(|v| v.chars().any(char::is_control)) {
+            return None;
+        }
         let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let mut cfg = String::new();
         cfg.push_str(&format!("url = \"{}\"\n", q(&format!("{base}{path}"))));
         cfg.push_str(&format!("request = \"{method}\"\n"));
-        cfg.push_str("silent\nshow-error\nmax-time = 10\n");
+        cfg.push_str("silent\nshow-error\nmax-time = 10\nmax-filesize = 1048576\n");
+        cfg.push_str("proto = \"=http,https\"\n");
         cfg.push_str("header = \"Accept: application/json\"\n");
-        if let Some(k) = &self.api_key {
+        if let (true, Some(k)) = (with_key, &self.api_key) {
+            if k.chars().any(char::is_control) {
+                return None;
+            }
             cfg.push_str(&format!("header = \"Authorization: Bearer {}\"\n", q(k)));
         }
         if let Some(b) = body {
+            // Json::to_string escapes every control character, so the body is always one line.
             cfg.push_str("header = \"Content-Type: application/json\"\n");
             cfg.push_str(&format!("data-binary = \"{}\"\n", q(&b.to_string())));
         }
@@ -179,13 +227,13 @@ impl AgentTrust {
 
     /// The agent's Agenttrust score and verdict. `None` if Agenttrust couldn't be reached.
     pub fn trust(&self, agent_id: &str, now_ms: i64) -> Option<TrustView> {
-        let at_id = agenttrust_id(agent_id);
+        let at_id = self.agenttrust_id(agent_id);
         if let Some((at, v)) = self.trust_cache.lock().unwrap().get(&at_id) {
             if now_ms - at < TRUST_CACHE_MS {
                 return v.clone();
             }
         }
-        let fetched = self.call("GET", &format!("/v1/trust/{at_id}"), None).and_then(|(code, j)| {
+        let fetched = self.call("GET", &format!("/v1/trust/{at_id}"), None, false).and_then(|(code, j)| {
             match code {
                 200 => Some(TrustView {
                     score: j.get("score").and_then(Json::as_f64),
@@ -198,7 +246,14 @@ impl AgentTrust {
         });
         // Cache only real answers, so a blip isn't remembered for five minutes.
         if fetched.is_some() {
-            self.trust_cache.lock().unwrap().insert(at_id, (now_ms, fetched.clone()));
+            let mut cache = self.trust_cache.lock().unwrap();
+            if cache.len() >= TRUST_CACHE_MAX {
+                cache.retain(|_, (at, _)| now_ms - *at < TRUST_CACHE_MS);
+                if cache.len() >= TRUST_CACHE_MAX {
+                    cache.clear();
+                }
+            }
+            cache.insert(at_id, (now_ms, fetched.clone()));
         }
         fetched
     }
@@ -236,26 +291,30 @@ impl AgentTrust {
             Json::num((void_idx + 1) as f64)
         };
 
-        let disputer_id = agenttrust_id(disputer);
+        let resolver_id = self.resolver_id();
+        let disputer_id = self.agenttrust_id(disputer);
         let mut fields = vec![
-            ("parties", Json::Array(vec![Json::str(RESOLVER_ID), Json::str(disputer_id.clone())])),
+            ("parties", Json::Array(vec![Json::str(resolver_id.clone()), Json::str(disputer_id.clone())])),
             ("outcomes", outcomes_json),
             ("stake", Json::num(stake_points.max(0.0))),
             ("asset", Json::str("IKENGA_POINTS")),
             ("domain", Json::str("wagering")),
-            ("secret", Json::str(self.secret_for(RESOLVER_ID))),
+            ("secret", Json::str(self.secret_for(&resolver_id))),
         ];
         if let Some(a) = &self.arbiter {
             fields.push(("arbiter", Json::str(a.clone())));
         }
         let (code, created) = self
-            .call("POST", "/v1/agreements", Some(&Json::obj(fields)))
+            .call("POST", "/v1/agreements", Some(&Json::obj(fields)), true)
             .ok_or("Agenttrust could not be reached")?;
         let agreement_id = created
             .get("agreement_id")
             .and_then(Json::as_str)
             .map(str::to_string)
             .ok_or_else(|| format!("Agenttrust refused the agreement ({code}): {}", created.to_string()))?;
+        if !is_safe_id(&agreement_id) {
+            return Err("Agenttrust returned a malformed agreement id; refusing it".into());
+        }
 
         let report = |who: &str, outcome: usize, evidence: String| {
             self.call(
@@ -267,19 +326,32 @@ impl AgentTrust {
                     ("secret", Json::str(self.secret_for(who))),
                     ("evidence", Json::str(evidence)),
                 ])),
+                true,
             )
+            .map(|(code, _)| (200..300).contains(&code))
+            .unwrap_or(false)
         };
         let short = |s: &str| s.chars().take(900).collect::<String>();
-        report(
-            RESOLVER_ID,
+        // No agent ids in evidence: it is published on Agenttrust. See the module docs.
+        let resolver_ok = report(
+            &resolver_id,
             proposed.unwrap_or(void_idx),
             short(&format!("Ikenga market {market_id}: \"{question}\". Resolver's evidence: {proposal_evidence}")),
         );
-        report(
+        let disputer_ok = report(
             &disputer_id,
             claimed.unwrap_or(void_idx),
-            short(&format!("Disputed by Ikenga agent {disputer}: {reason}")),
+            short(&format!("The disputer's reason: {reason}")),
         );
+        // Both sides must be on record. If either report was refused, the agreement would settle
+        // "by default" for the side that did report — not a ruling anyone should be paid on. Keep
+        // the dispute with the operator instead; the unaccepted agreement cancels itself on
+        // Agenttrust's side with no penalty to anyone.
+        if !(resolver_ok && disputer_ok) {
+            return Err(format!(
+                "Agenttrust refused a report on {agreement_id}; keeping the dispute with the operator"
+            ));
+        }
         Ok(agreement_id)
     }
 
@@ -287,8 +359,11 @@ impl AgentTrust {
     pub fn verdict(&self, agreement_id: &str, outcome_count: usize) -> Option<Verdict> {
         // Nudge Agenttrust's clocks (report deadlines, closed juries) forward. Harmless if it
         // has nothing to do.
-        let _ = self.call("POST", "/v1/sweep", Some(&Json::obj(vec![])));
-        let (code, j) = self.call("GET", &format!("/v1/agreements/{agreement_id}"), None)?;
+        if !is_safe_id(agreement_id) {
+            return None;
+        }
+        let _ = self.call("POST", "/v1/sweep", Some(&Json::obj(vec![])), true);
+        let (code, j) = self.call("GET", &format!("/v1/agreements/{agreement_id}"), None, true)?;
         if code != 200 {
             return None;
         }
@@ -312,9 +387,40 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn ids_are_namespaced_and_clean() {
-        assert_eq!(agenttrust_id("agent_ABC"), "ikenga-agent_ABC");
-        assert_eq!(agenttrust_id("a/b?c"), "ikenga-abc");
+    fn ids_are_pseudonyms_that_never_contain_the_agent_id() {
+        let at = AgentTrust::new(None, None, None, b"k".to_vec());
+        let id = at.agenttrust_id("agent_ABC");
+        assert!(id.starts_with("ikenga-") && id.len() == "ikenga-".len() + 20, "{id}");
+        assert!(!id.contains("agent_ABC"), "the real id must never leave the server");
+        assert!(is_safe_id(&id));
+        assert_eq!(id, at.agenttrust_id("agent_ABC"), "stable per agent");
+        assert_ne!(id, at.agenttrust_id("agent_ABD"));
+        let other_key = AgentTrust::new(None, None, None, b"k2".to_vec());
+        assert_ne!(id, other_key.agenttrust_id("agent_ABC"), "unpredictable without the key");
+        assert_ne!(at.resolver_id(), "ikenga-resolver", "the resolver id is not guessable either");
+    }
+
+    #[test]
+    fn only_safe_agreement_ids_are_accepted() {
+        assert!(is_safe_id("agr_12"));
+        for bad in ["", "agr 1", "a\nb", "a\"b", "../x", "a/b", "x?y=1", &"a".repeat(65)] {
+            assert!(!is_safe_id(bad), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn agenttrust_must_be_https_except_on_this_machine() {
+        assert!(url_allowed("https://agenttrust.example"));
+        assert!(url_allowed("http://127.0.0.1:9000"));
+        assert!(!url_allowed("http://agenttrust.example"));
+        assert!(!url_allowed("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn a_control_character_never_reaches_curl() {
+        let at = AgentTrust::new(Some("http://127.0.0.1:1".into()), Some("k".into()), None, vec![1]);
+        assert_eq!(at.call("GET", "/v1/x\noutput = \"/tmp/pwned\"", None, true), None);
+        assert!(!std::path::Path::new("/tmp/pwned").exists());
     }
 
     #[test]
@@ -407,14 +513,16 @@ mod tests {
         assert_eq!(create.get("arbiter").and_then(Json::as_str), Some("judge"));
         assert_eq!(seen[0].2, "Authorization: Bearer at_live_key");
         let parties = create.get("parties").and_then(Json::as_array).unwrap();
-        assert_eq!(parties[1].as_str(), Some("ikenga-agent_B"));
+        assert_eq!(parties[1].as_str(), Some(at.agenttrust_id("agent_B").as_str()));
+        assert!(!seen[0].1.contains("agent_B") && !seen[1].1.contains("agent_B") && !seen[2].1.contains("agent_B"),
+                "no real agent id in anything sent to Agenttrust");
         let outcomes = create.get("outcomes").and_then(Json::as_array).unwrap();
         assert_eq!(outcomes.len(), 3, "the market's outcomes plus void");
         let r1 = json::parse(&seen[1].1).unwrap();
         let r2 = json::parse(&seen[2].1).unwrap();
-        assert_eq!(r1.get("agent_id").and_then(Json::as_str), Some(RESOLVER_ID));
+        assert_eq!(r1.get("agent_id").and_then(Json::as_str), Some(at.resolver_id().as_str()));
         assert_eq!(r1.get("outcome").and_then(Json::as_f64), Some(0.0));
-        assert_eq!(r2.get("agent_id").and_then(Json::as_str), Some("ikenga-agent_B"));
+        assert_eq!(r2.get("agent_id").and_then(Json::as_str), Some(at.agenttrust_id("agent_B").as_str()));
         assert_eq!(r2.get("outcome").and_then(Json::as_f64), Some(1.0));
         assert_ne!(r1.get("secret"), r2.get("secret"));
     }
@@ -440,6 +548,30 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_report_keeps_the_dispute_with_the_operator() {
+        // Someone squatted one side's identity, so its report is refused. Referring anyway would
+        // let the other side win by default.
+        let (url, _) = fake_agenttrust(vec![
+            ("/v1/agreements/agr_2/report", 401, "{\"error\":\"wrong secret for this id\"}".into()),
+            ("/v1/agreements", 201, "{\"agreement_id\":\"agr_2\"}".into()),
+        ]);
+        let at = AgentTrust::new(Some(url), Some("k".into()), None, b"s".to_vec());
+        let e = at.refer("m", "q", &["Y".into(), "N".into()], 0.0, Some(0), "e", "x", Some(1), "r").unwrap_err();
+        assert!(e.contains("operator"), "{e}");
+    }
+
+    #[test]
+    fn a_malformed_agreement_id_is_refused() {
+        let (url, seen) = fake_agenttrust(vec![
+            ("/v1/agreements", 201, "{\"agreement_id\":\"agr_1\\noutput = /app/data/ikenga.wal\"}".into()),
+        ]);
+        let at = AgentTrust::new(Some(url), Some("k".into()), None, b"s".to_vec());
+        assert!(at.refer("m", "q", &["Y".into(), "N".into()], 0.0, Some(0), "e", "x", None, "r").is_err());
+        assert_eq!(seen.lock().unwrap().len(), 1, "nothing was sent with the injected id");
+        assert_eq!(at.verdict("agr_1\noutput = /x", 2), None);
+    }
+
+    #[test]
     fn verdicts_map_onto_market_outcomes() {
         let (url, _) = fake_agenttrust(vec![
             ("/v1/sweep", 200, "{}".into()),
@@ -459,16 +591,15 @@ mod tests {
     #[test]
     fn trust_scores_are_read_and_cached() {
         let (url, seen) = fake_agenttrust(vec![
-            ("/v1/trust/ikenga-good", 200, "{\"score\":412,\"trust_level\":\"fair\"}".into()),
+            ("/v1/trust/ikenga-", 200, "{\"score\":412,\"trust_level\":\"fair\"}".into()),
         ]);
-        let at = AgentTrust::new(Some(url), None, None, b"s".to_vec());
+        let at = AgentTrust::new(Some(url), Some("secret_platform_key".into()), None, b"s".to_vec());
         let v = at.trust("good", 1_000).unwrap();
         assert_eq!(v.score, Some(412.0));
         assert_eq!(v.verdict.as_deref(), Some("fair"));
         at.trust("good", 2_000).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 1, "second read came from the cache");
-        let unknown = at.trust("nobody", 1_000).unwrap();
-        assert_eq!(unknown.verdict.as_deref(), Some("unknown"));
+        assert_eq!(seen.lock().unwrap()[0].2, "", "public lookups never carry the platform key");
     }
 
     #[test]

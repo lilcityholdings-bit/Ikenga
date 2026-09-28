@@ -464,6 +464,13 @@ impl AppState {
                     }
                 }
                 Record::MarketReferred { market_id, agreement_id } => {
+                    // Checked on the way back in too: this id came from another service, and it
+                    // ends up in a URL. A bad one is dropped and the dispute stays with the
+                    // operator (and the 24-hour backstop).
+                    if !crate::agenttrust::is_safe_id(&agreement_id) {
+                        eprintln!("WAL: ignoring malformed Agenttrust agreement id for {market_id}");
+                        continue;
+                    }
                     self.agenttrust.referrals.lock().unwrap().insert(
                         market_id,
                         crate::agenttrust::Referral { agreement_id, last_polled_ms: 0 },
