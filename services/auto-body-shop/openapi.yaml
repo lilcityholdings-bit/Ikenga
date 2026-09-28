@@ -10,6 +10,9 @@ info:
     shop.py for the full mechanism.
 
     Amounts are integer atomic units (1e-6 of the settlement asset, i.e. USDC's 6 decimals).
+    Money-moving POSTs accept an Idempotency-Key header: a retry replays the first response
+    instead of paying twice. POSTs from an account frozen by a card dispute get 403.
+    See PAYMENTS.md (pricing, rails) and SECURITY.md (the audit).
     Errors are `{"detail": "..."}`. The four endpoints of the original 1.0 contract
     (config, telemetry, approve, rollback) keep their request and response fields; they now
     require an API key.
@@ -60,6 +63,9 @@ components:
     Policy:
       type: object
       properties:
+        value_per_failure: {type: integer, nullable: true, description: 'What one failed run costs the owner, in atomic units. Enables the quote and amount "auto".'}
+        payback_days: {type: number, default: 30}
+        offer_share: {type: number, default: 0.5, description: Share of the expected savings offered to the repairer.}
         auto_bounty:
           nullable: true
           allOf: [{$ref: '#/components/schemas/BountyTerms'}]
@@ -78,7 +84,15 @@ components:
       type: object
       required: [amount]
       properties:
-        amount: {type: integer, description: Maximum reward, escrowed on posting.}
+        amount: {oneOf: [{type: integer}, {type: string, enum: [auto]}], description: 'Maximum reward, escrowed on posting. "auto" prices it from the quote.'}
+        min_amount: {type: integer, description: Floor for "auto".}
+        max_amount: {type: integer, description: Ceiling for "auto".}
+        private_to: {type: array, items: {type: string}, description: Only these accounts (and the owner) can see and submit. Not listed publicly.}
+        mutable_fields:
+          type: array
+          items: {type: string, enum: [system_instruction, examples, params, model, tools]}
+          default: [system_instruction, examples]
+          description: What a fix may change. Omitted fields are inherited from the baseline; explicit changes to other fields get 422.
         threshold: {type: number, default: 0.5, description: 'Fraction of hidden failures a fix must repair for the full award; the award scales linearly below it.'}
         warranty_bps: {type: integer, default: 3000, description: Share of the net award held back until the fix proves itself live.}
         duration_s: {type: number, default: 86400}
@@ -126,6 +140,16 @@ paths:
     get:
       summary: Balance, keys, mandates and agents of the calling account
       responses: {'200': {description: OK}}
+  /v1/accounts/me/statement:
+    get:
+      summary: Every ledger entry touching this account (holds, captures, releases, awards, deposits, payouts)
+      parameters: [{name: after, in: query, schema: {type: integer}}]
+      responses: {'200': {description: '{account_id, balance, entries}'}}
+  /dashboard:
+    get:
+      summary: Owner dashboard (static HTML; the API key stays in the browser tab)
+      security: []
+      responses: {'200': {description: HTML}}
   /v1/accounts/{account_id}/reputation:
     get:
       summary: Public track record (wins, awards, warranties released or refunded)
@@ -185,6 +209,12 @@ paths:
         - {name: after, in: query, schema: {type: integer}}
       responses: {'200': {description: OK}}
 
+  /v1/agents/{agent_id}/quote:
+    get:
+      summary: What this agent's failures cost, and what a repair is worth
+      description: 'failures/day from the last 7 days of verified failures; savings = value_per_failure x failures/day x payback_days x threshold; suggested_bounty = savings x offer_share.'
+      parameters: [{name: agent_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
   /v1/config/{agent_id}:
     get:
       summary: Fetch Active Configuration
@@ -315,7 +345,7 @@ paths:
             schema:
               allOf: [{$ref: '#/components/schemas/BountyTerms'}, {type: object, required: [agent_id], properties: {agent_id: {type: string}}}]
       responses:
-        '201': {description: '{bounty_id, status, commitment, terms, baseline_fee, mandate_id}'}
+        '201': {description: '{bounty_id, status, commitment, terms, baseline_fee_held, mandate_id}'}
         '402': {description: Insufficient balance}
         '403': {description: No mandate covers it (reason given)}
         '409': {description: Already has an open bounty, or no failures to repair}
@@ -336,7 +366,8 @@ paths:
       requestBody:
         content: {application/json: {schema: {type: object, required: [config], properties: {config: {$ref: '#/components/schemas/Config'}}}}}
       responses:
-        '202': {description: '{submission_id, status: EVALUATING, fee, mandate_id}'}
+        '202': {description: '{submission_id, status: EVALUATING, fee_held, mandate_id}. The hold is captured at metered cost plus margin; the rest is released.'}
+        '422': {description: The config changes a field the bounty doesn't allow}
         '409': {description: Not open}
         '429': {description: Submission limit reached}
   /v1/submissions/{submission_id}:
@@ -363,12 +394,38 @@ paths:
         '402': {description: Payment required, or rejected}
         '403': {description: Real money disabled}
         '409': {description: Payment already credited}
+  /v1/deposits/stripe:
+    post:
+      summary: Start a card top-up (Stripe Checkout); returns the payment URL
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [amount_cents], properties: {amount_cents: {type: integer, minimum: 50}}}}}
+      responses: {'201': {description: '{session_id, url, amount_cents}'}, '403': {description: Real money disabled}}
+  /v1/webhooks/stripe:
+    post:
+      summary: Stripe events (signature-checked; each event id processed once)
+      description: checkout.session.completed / async_payment_succeeded credit the account. charge.dispute.created / charge.refunded freeze it and claw back what is left.
+      security: []
+      parameters: [{name: Stripe-Signature, in: header, required: true, schema: {type: string}}]
+      responses: {'200': {description: Received}, '400': {description: Bad or stale signature}}
+  /v1/payouts/destination:
+    post:
+      summary: Register where withdrawals go (owner key). A change restarts the cooling period.
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string}}}}}
+      responses: {'200': {description: '{destination, auto_payouts_from}'}}
   /v1/withdrawals:
     post:
-      summary: Request a payout (owner key; real-money mode). Funds are held until the operator marks it PAID or FAILED.
+      summary: Withdraw to the registered destination (owner key; real-money mode)
+      description: Paid at once (200, PAID) only if the account is verified, the destination is past its cooling period, the amount is within the automatic limits and the funds are older than ABS_FUNDS_AGE_S. Otherwise 202 PENDING, with the reason in `review`.
       requestBody:
-        content: {application/json: {schema: {type: object, required: [amount, destination], properties: {amount: {type: integer}, destination: {type: string}}}}}
-      responses: {'202': {description: PENDING}}
+        content: {application/json: {schema: {type: object, required: [amount], properties: {amount: {type: integer}}}}}
+      responses: {'200': {description: PAID}, '202': {description: PENDING for operator review}, '409': {description: No destination registered}}
+  /v1/admin/accounts/{account_id}/verify:
+    post:
+      summary: Mark an account verified (KYC done) for automatic payouts
+      security: [{AdminKey: []}]
+      parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: OK}}
 
   /v1/admin/grants:
     post:

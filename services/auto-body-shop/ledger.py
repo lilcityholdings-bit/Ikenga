@@ -16,6 +16,7 @@ Accounts are strings:
     acct:<id>                 a customer or repair bot's spendable balance
     escrow:bounty:<id>        a bounty's reward, held until settlement
     escrow:warranty:<id>      the part of an award held back until the fix proves itself live
+    hold:<ref>                a pre-authorised maximum for metered work (see hold/settle_hold)
     platform:fees             the operator's take and referee fees (revenue)
     pending:withdrawals       funds on their way out, awaiting payout
     world:<rail>              money outside the system (x402 deposits, grants, payouts); may go negative
@@ -98,8 +99,10 @@ def authorize(store, principal, amount, purpose, agent_id=None):
             if amount > m["max_per_tx"]:
                 reasons.append(f"{m['id']}: {amount} exceeds max_per_tx {m['max_per_tx']}")
                 continue
-            spent = db.execute("SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE mandate_id=? AND created_at>?",
-                               (m["id"], now - DAY)).fetchone()[0]
+            # Net spend: money back to the account under the same mandate (the unused part of a
+            # hold) doesn't count against the cap.
+            spent = db.execute("SELECT COALESCE(SUM(CASE WHEN to_acct=? THEN -amount ELSE amount END), 0) FROM transfers"
+                               " WHERE mandate_id=? AND created_at>?", (acct(m["account_id"]), m["id"], now - DAY)).fetchone()[0]
             if spent + amount > m["max_per_day"]:
                 reasons.append(f"{m['id']}: would bring 24h spend to {spent + amount}, over max_per_day {m['max_per_day']}")
                 continue
@@ -112,6 +115,40 @@ def spend(store, principal, amount, purpose, to_acct, kind, ref, agent_id=None):
         mandate_id = authorize(store, principal, amount, purpose, agent_id)
         transfer(store, acct(principal["account_id"]), to_acct, amount, kind, ref, mandate_id)
         return mandate_id
+
+
+def hold(store, principal, amount, purpose, ref, agent_id=None):
+    """Authorise-then-capture, like a card pre-authorisation or x402's "upto" scheme: reserve the
+    most this work can cost (checked against the mandate), then capture what it actually cost
+    and release the rest. The payer never pays for an estimate."""
+    with store.tx():
+        mandate_id = authorize(store, principal, amount, purpose, agent_id)
+        transfer(store, acct(principal["account_id"]), f"hold:{ref}", amount, "hold", ref, mandate_id)
+        return mandate_id
+
+
+def settle_hold(store, ref, account_id, capture, to_acct, kind):
+    """Captures up to the held amount (a cost overrun is the operator's problem, never the
+    payer's) and releases the remainder. The release carries the hold's mandate, so the unused
+    part stops counting against that mandate's daily cap. Returns what was captured."""
+    with store.tx() as db:
+        held = balance(db, f"hold:{ref}")
+        row = db.execute("SELECT mandate_id FROM transfers WHERE to_acct=? AND kind='hold' ORDER BY id DESC LIMIT 1",
+                         (f"hold:{ref}",)).fetchone()
+        mandate_id = row["mandate_id"] if row else None
+        captured = max(0, min(capture, held))
+        transfer(store, f"hold:{ref}", to_acct, captured, kind, ref)
+        transfer(store, f"hold:{ref}", acct(account_id), held - captured, "hold_release", ref, mandate_id)
+        return captured
+
+
+def statement(db, account_id, after=0, limit=500):
+    a = acct(account_id)
+    rows = db.execute("SELECT id, from_acct, to_acct, amount, kind, ref, mandate_id, created_at FROM transfers"
+                      " WHERE (from_acct=? OR to_acct=?) AND id>? ORDER BY id LIMIT ?", (a, a, after, limit)).fetchall()
+    return [{"id": r["id"], "amount": r["amount"] if r["to_acct"] == a else -r["amount"],
+             "counterparty": r["from_acct"] if r["to_acct"] == a else r["to_acct"], "kind": r["kind"],
+             "ref": r["ref"], "mandate_id": r["mandate_id"], "at": r["created_at"]} for r in rows]
 
 
 def invariant(db):

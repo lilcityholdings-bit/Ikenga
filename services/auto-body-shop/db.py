@@ -12,6 +12,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
+    frozen     INTEGER NOT NULL DEFAULT 0,     -- set by a card dispute: read-only until the operator clears it
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS keys (
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS bounties (
     agent_id         TEXT NOT NULL,
     account_id       TEXT NOT NULL,
     amount           INTEGER NOT NULL,
-    baseline_fee     INTEGER NOT NULL,
+    baseline_fee     INTEGER NOT NULL,         -- held at posting (max), then captured at metered cost
     terms            TEXT NOT NULL,            -- JSON, committed
     commitment       TEXT NOT NULL,
     seed             TEXT NOT NULL,            -- secret until settlement
@@ -145,7 +146,8 @@ CREATE TABLE IF NOT EXISTS submissions (
     config         TEXT NOT NULL,              -- sealed: never shown to the bounty's owner unless it wins
     fingerprint    TEXT NOT NULL,
     status         TEXT NOT NULL CHECK (status IN ('EVALUATING','EVALUATED','FAILED')),
-    fee            INTEGER NOT NULL,           -- referee fee paid; refunded if the referee itself fails
+    fee            INTEGER NOT NULL,           -- referee fee held at submission (max), then captured at metered cost
+    cost           INTEGER,                    -- metered model cost of scoring it
     visible_result TEXT,
     hidden_result  TEXT,                       -- secret until settlement
     error          TEXT,
@@ -172,7 +174,8 @@ CREATE TABLE IF NOT EXISTS deposits (
     account_id  TEXT NOT NULL,
     amount      INTEGER NOT NULL,
     rail        TEXT NOT NULL,
-    reference   TEXT NOT NULL UNIQUE,          -- on-chain tx hash: the same payment can't credit twice
+    reference   TEXT NOT NULL UNIQUE,          -- on-chain tx hash / Checkout session: the same payment can't credit twice
+    payment_ref TEXT,                          -- Stripe payment_intent, to match later disputes and refunds
     payer       TEXT,
     created_at  REAL NOT NULL
 );
@@ -185,6 +188,34 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     reference   TEXT,
     created_at  REAL NOT NULL,
     updated_at  REAL
+);
+
+-- Where an account's withdrawals go, and whether the operator has verified who it is (KYC).
+-- Changing the destination restarts a cooling period before automatic payouts resume: the
+-- standard defence against a stolen key being used to redirect funds.
+CREATE TABLE IF NOT EXISTS payout_profiles (
+    account_id         TEXT PRIMARY KEY,
+    destination        TEXT,
+    destination_set_at REAL,
+    verified           INTEGER NOT NULL DEFAULT 0
+);
+
+-- Responses to POSTs that carried an Idempotency-Key, so a bot retrying after a timeout gets the
+-- original result instead of paying twice.
+CREATE TABLE IF NOT EXISTS idempotency (
+    key_id     TEXT NOT NULL,
+    idem_key   TEXT NOT NULL,
+    request    TEXT NOT NULL,                  -- sha256 of method, path and body
+    status     INTEGER NOT NULL,
+    response   TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (key_id, idem_key)
+);
+
+-- Stripe event ids already processed: Stripe redelivers, and a dispute must only claw back once.
+CREATE TABLE IF NOT EXISTS webhook_events (
+    id         TEXT PRIMARY KEY,
+    created_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (

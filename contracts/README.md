@@ -176,3 +176,35 @@ size.
   pro-rata splits, winner-never-loses, fee-from-losing-side-only, double claim, double withdraw,
   reentrancy, owner-cannot-move-escrow, fee cap, `expire()` called by a stranger, a solvency fuzz
   test, and a fee-on-transfer token. Never executed.
+
+---
+
+## RepairEscrow.sol: escrow for Auto Body Shop bounties
+
+A second, separate contract: it holds repair-bounty rewards (see `services/auto-body-shop`) so
+the operator never holds them.
+- The referee can only split a funded bounty by the same formula the shop uses, and only pay
+  an address that registered the winning submission in time.
+- The take is capped at deployment.
+- The warranty defaults to the repairer if the referee goes quiet.
+- Anyone can refund the funder once the settlement deadline passes.
+
+Unlike `IkengaEscrow.sol` above, this one **has been compiled (solc 0.8.26) and tested** on an
+in-memory EVM. Ten tests cover:
+- the full lifecycle, matching the shop's payout formula to the unit;
+- the attacks it has to stop: submission front-running, paying a non-submitter, an owner
+  swapping the referee on funded bounties, and id squatting;
+- every deadline and access check;
+- solvency after every test.
+
+```bash
+pip install py-solc-x "eth-tester[py-evm]" web3
+python3 contracts/test/test_repair_escrow.py
+```
+
+It has **not** been deployed to a testnet or audited by a third party. Both are required before
+it holds real funds. See `services/auto-body-shop/SECURITY.md` for the findings it was hardened
+against.
+
+(While setting that up: `IkengaEscrow.sol` compiles with solc 0.8.24. Its Foundry tests still
+need `forge` to run.)

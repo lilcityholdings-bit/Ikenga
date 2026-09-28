@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto Body Shop</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1c1b19; --muted: #6b6760; --line: #e4e1db;
+    --accent: #1f6f5c; --bad: #b3362b; --good: #1f6f5c; --warn: #9a6a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141412; --card: #1d1c1a; --ink: #ecebe7; --muted: #a09c94; --line: #2e2c29;
+            --accent: #5cc0a4; --bad: #ef7d72; --good: #5cc0a4; --warn: #e0b04f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; }
+  p.sub { color: var(--muted); margin: 0 0 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input { flex: 1 1 240px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+          background: var(--bg); color: var(--ink); font: inherit; }
+  button { padding: 9px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 20px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  td.num { text-align: right; white-space: nowrap; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); }
+  .ACTIVE, .PROMOTED, .RELEASED, .SETTLED { color: var(--good); border-color: var(--good); }
+  .ROLLED_BACK, .FAILED, .REFUNDED { color: var(--bad); border-color: var(--bad); }
+  .RUNNING, .OPEN, .PREPARING, .HELD, .VERIFYING, .STAGED { color: var(--warn); border-color: var(--warn); }
+  .pos { color: var(--good); } .neg { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .err { color: var(--bad); margin-top: 8px; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Auto Body Shop</h1>
+  <p class="sub">Your agents' verified failures, what they cost, what a repair is worth, and where every unit of money went.</p>
+
+  <div class="card">
+    <div class="row">
+      <input id="key" type="password" placeholder="API key (abs_…); kept only in this tab" autocomplete="off">
+      <button id="go">Load</button>
+    </div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div id="out"></div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const usd = (u) => u == null ? "—" : (u / 1e6).toLocaleString(undefined, {style: "currency", currency: "USD", maximumFractionDigits: u % 10000 ? 4 : 2});
+const pct = (x) => x == null ? "—" : (x * 100).toFixed(1) + "%";
+const when = (t) => t ? new Date(t * 1000).toLocaleString() : "—";
+const pill = (s) => s ? `<span class="pill ${esc(s)}">${esc(s)}</span>` : "";
+
+let key = "";
+try { key = sessionStorage.getItem("abs_key") || ""; } catch (e) {}
+$("#key").value = key;
+
+async function api(path) {
+  const r = await fetch(path, {headers: {Authorization: "Bearer " + key}});
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
+  return body;
+}
+
+function tile(k, v) { return `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`; }
+
+async function agentCard(id) {
+  const [q, v, ev] = await Promise.all([api(`/v1/agents/${encodeURIComponent(id)}/quote`),
+    api(`/v1/versions/${encodeURIComponent(id)}`), api(`/v1/agents/${encodeURIComponent(id)}/events`)]);
+  const active = v.versions.find((x) => x.status === "ACTIVE");
+  const ro = v.rollouts[v.rollouts.length - 1];
+  const cases = v.cases || {};
+  let html = `<div class="card"><div class="row" style="justify-content:space-between"><strong>${esc(id)}</strong>
+    <span class="muted">live: <code>${esc(active && active.version)}</code></span></div>
+    <div class="tiles" style="margin-top:10px">
+      ${tile("Verified failure rate", pct(q.failure_rate))}
+      ${tile("Failures / day", q.failures_per_day)}
+      ${tile("Failures cost / day", q.failure_cost_per_day != null ? usd(q.failure_cost_per_day) : '<span class="muted" style="font-size:13px">set value_per_failure</span>')}
+      ${tile("Suggested repair bounty", q.suggested_bounty != null ? usd(q.suggested_bounty) : "—")}
+      ${tile("Open failure cases", (cases.failure || {}).unassigned ?? 0)}
+      ${tile("Permanent regression tests", (cases.regression || {}).total ?? 0)}
+    </div>`;
+  if (q.expected_savings != null) {
+    html += `<p class="muted" style="margin:10px 0 0">A repair fixing ${pct(q.threshold)} of failures saves about ${usd(q.expected_savings)}
+      over ${q.payback_days} days; offering ${pct(q.offer_share)} of that leaves you ${usd(q.owner_net_if_full_award)} ahead even at a full award.</p>`;
+  }
+  if (ro) {
+    const d = ro.decision || {};
+    html += `<h2>Latest rollout</h2><div class="scroll"><table><tr><th>Candidate</th><th>Status</th><th class="num">Candidate fails</th><th class="num">Baseline fails</th><th>Rule</th></tr>
+      <tr><td><code>${esc(ro.candidate)}</code></td><td>${pill(ro.status)}</td>
+      <td class="num">${d.candidate ? `${d.candidate.failures}/${d.candidate.n}` : "—"}</td>
+      <td class="num">${d.baseline ? `${d.baseline.failures}/${d.baseline.n}` : "—"}</td><td>${esc(d.rule || "collecting traffic")}</td></tr></table></div>`;
+  }
+  html += `<h2>Versions</h2><div class="scroll"><table><tr><th>Version</th><th>Status</th><th>Source</th><th class="num">Runs</th><th class="num">Verified failures</th></tr>` +
+    v.versions.slice(-8).reverse().map((x) => `<tr><td><code>${esc(x.version)}</code></td><td>${pill(x.status)}</td><td>${esc(x.source)}</td>
+      <td class="num">${x.traces}</td><td class="num">${pct(x.verified_failure_rate)}</td></tr>`).join("") + `</table></div>`;
+  html += `<h2>Recent events</h2><div class="scroll"><table><tr><th>When</th><th>Event</th><th>Detail</th></tr>` +
+    ev.events.slice(-10).reverse().map((e) => `<tr><td>${when(e.created_at)}</td><td>${esc(e.kind)}</td>
+      <td class="muted">${esc(e.detail.reason || e.detail.rule || (e.detail.amount != null ? usd(e.detail.amount) : "") || (e.detail.bounty_id ? "bounty " + e.detail.bounty_id : ""))}</td></tr>`).join("") +
+    `</table></div></div>`;
+  return html;
+}
+
+async function load() {
+  $("#err").textContent = "";
+  key = $("#key").value.trim();
+  try { sessionStorage.setItem("abs_key", key); } catch (e) {}
+  if (!key) return;
+  try {
+    const [me, st, bounties] = await Promise.all([api("/v1/accounts/me"), api("/v1/accounts/me/statement"), api("/v1/bounties")]);
+    let html = `<h2>Account</h2><div class="card"><div class="tiles">
+      ${tile("Balance", usd(me.balance))}
+      ${tile("Agents", me.agents.length)}
+      ${tile("Active mandates", me.mandates.filter((m) => !m.revoked && m.expires_at * 1000 > Date.now()).length)}
+      ${tile("Signed in as", `<span style="font-size:13px">${esc(me.name)} · ${esc(me.key.scope)} key</span>`)}
+    </div></div>`;
+    if (me.mandates.length) {
+      html += `<h2>Spending mandates (what your bots may pay without asking)</h2><div class="card scroll"><table>
+        <tr><th>Mandate</th><th>Purpose</th><th>Agent</th><th class="num">Per payment</th><th class="num">Per 24h</th><th>Expires</th></tr>` +
+        me.mandates.map((m) => `<tr><td><code>${esc(m.id)}</code>${m.revoked ? " " + pill("REVOKED") : ""}</td><td>${esc(m.purpose)}</td>
+          <td>${esc(m.agent_id || "any")}</td><td class="num">${usd(m.max_per_tx)}</td><td class="num">${usd(m.max_per_day)}</td><td>${when(m.expires_at)}</td></tr>`).join("") +
+        `</table></div>`;
+    }
+    for (const id of me.agents) html += `<h2>Agent</h2>` + await agentCard(id);
+    html += `<h2>Statement</h2><div class="card scroll"><table><tr><th>When</th><th>What</th><th>Counterparty</th><th class="num">Amount</th></tr>` +
+      st.entries.slice(-25).reverse().map((e) => `<tr><td>${when(e.at)}</td><td>${esc(e.kind)} <span class="muted">${esc(e.ref || "")}</span></td>
+        <td class="muted">${esc(e.counterparty)}</td><td class="num ${e.amount < 0 ? "neg" : "pos"}">${usd(e.amount)}</td></tr>`).join("") +
+      `</table></div>`;
+    html += `<h2>Open bounties (market)</h2><div class="card scroll"><table><tr><th>#</th><th>Agent</th><th class="num">Reward</th><th>Closes</th></tr>` +
+      (bounties.bounties.map((b) => `<tr><td>${b.id}</td><td>${esc(b.agent_id)}</td><td class="num">${usd(b.amount)}</td><td>${when(b.closes_at)}</td></tr>`).join("")
+       || `<tr><td colspan="4" class="muted">None open right now.</td></tr>`) + `</table></div>`;
+    $("#out").innerHTML = html;
+  } catch (e) {
+    $("#err").textContent = e.message;
+  }
+}
+$("#go").addEventListener("click", load);
+$("#key").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+if (key) load();
+</script>
+</body>
+</html>

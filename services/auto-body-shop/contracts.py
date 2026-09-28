@@ -16,6 +16,11 @@ Anything else is rejected when the contract is set, not silently ignored at chec
 import json
 import re
 
+try:
+    import re._parser as sre_parse  # Python 3.11+
+except ImportError:  # pragma: no cover
+    import sre_parse
+
 from db import ApiError
 
 SCHEMA_KEYS = {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
@@ -23,6 +28,55 @@ SCHEMA_KEYS = {"type", "properties", "required", "additionalProperties", "items"
                "description", "title"}
 TYPES = {"object": dict, "array": list, "string": str, "boolean": bool, "null": type(None)}
 GRADERS = ("contract", "equals", "json_equals", "contains", "regex")
+# Graders anyone other than the agent's owner may attach. No regex: see safe_regex.
+CONSUMER_GRADERS = ("contract", "equals", "json_equals", "contains")
+MAX_PATTERN = 256
+MAX_REGEX_SUBJECT = 20_000
+_REPEATS = {sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT, getattr(sre_parse, "POSSESSIVE_REPEAT", None)}
+
+
+def safe_regex(pattern, where):
+    """Refuse patterns that can backtrack catastrophically (ReDoS).
+
+    Python's `re` has no timeout and holds the interpreter lock while matching, so one bad
+    pattern like (a+)+$ freezes the whole server, for every customer, on an input of a few
+    dozen characters. Rejected: nested unbounded repetition (a repeat inside a repeat, the
+    classic exponential shape), backreferences, and patterns over 256 characters. Subjects are
+    also capped (MAX_REGEX_SUBJECT) wherever a pattern is run. This is a structural check, not
+    a proof of linear time, which is why it's paired with the subject cap."""
+    if not isinstance(pattern, str) or len(pattern) > MAX_PATTERN:
+        raise ApiError(422, f"{where}: pattern must be a string of at most {MAX_PATTERN} characters")
+    try:
+        parsed = sre_parse.parse(pattern)
+    except re.error as e:
+        raise ApiError(422, f"{where}: bad pattern: {e}")
+
+    def walk(items, inside_repeat):
+        for op, arg in items:
+            if op in (sre_parse.GROUPREF, getattr(sre_parse, "GROUPREF_EXISTS", None)):
+                raise ApiError(422, f"{where}: backreferences are not allowed")
+            if op in _REPEATS:
+                lo, hi, sub = arg
+                unbounded = hi == sre_parse.MAXREPEAT or hi > 100
+                if inside_repeat and unbounded:
+                    raise ApiError(422, f"{where}: nested repetition like (a+)+ is not allowed (it can backtrack "
+                                        f"catastrophically); use a JSON schema, or a pattern with no repeat inside a repeat")
+                walk(sub, inside_repeat or unbounded)
+            elif op == sre_parse.SUBPATTERN:
+                walk(arg[-1], inside_repeat)
+            elif op == sre_parse.BRANCH:
+                for branch in arg[1]:
+                    walk(branch, inside_repeat)
+            elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
+                walk(arg[1], inside_repeat)
+    walk(parsed, False)
+    return pattern
+
+
+def _bounded_search(pattern, text, full=False):
+    if text is None or len(text) > MAX_REGEX_SUBJECT:
+        return False
+    return (re.fullmatch(pattern, text, re.S) if full else re.search(pattern, text)) is not None
 
 
 def check_schema_supported(schema, path="$"):
@@ -36,10 +90,7 @@ def check_schema_supported(schema, path="$"):
     if "items" in schema:
         check_schema_supported(schema["items"], f"{path}[]")
     if "pattern" in schema:
-        try:
-            re.compile(schema["pattern"])
-        except re.error as e:
-            raise ApiError(422, f"Bad pattern at {path}: {e}")
+        safe_regex(schema["pattern"], f"schema {path}")
 
 
 def _is_type(value, t):
@@ -66,7 +117,7 @@ def validate(schema, value, path="$"):
             return f"{path}: shorter than {schema['minLength']}"
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             return f"{path}: longer than {schema['maxLength']}"
-        if "pattern" in schema and not re.search(schema["pattern"], value):
+        if "pattern" in schema and not _bounded_search(schema["pattern"], value):
             return f"{path}: does not match {schema['pattern']!r}"
     if _is_type(value, "number"):
         if "minimum" in schema and value < schema["minimum"]:
@@ -107,10 +158,7 @@ def normalize_contract(contract):
     if contract["type"] == "json_schema":
         check_schema_supported(contract.get("schema"))
     if contract["type"] == "regex":
-        try:
-            re.compile(contract.get("pattern") or "")
-        except re.error as e:
-            raise ApiError(422, f"Bad contract pattern: {e}")
+        safe_regex(contract.get("pattern"), "contract")
     return contract
 
 
@@ -122,7 +170,7 @@ def check_contract(contract, output):
     if output is None:
         return False, "no output"
     if kind == "regex":
-        return (True, "ok") if re.fullmatch(contract["pattern"], output, re.S) else (False, "output does not match contract pattern")
+        return (True, "ok") if _bounded_search(contract["pattern"], output, full=True) else (False, "output does not match contract pattern")
     try:
         value = json.loads(output)
     except ValueError:
@@ -131,21 +179,20 @@ def check_contract(contract, output):
     return (False, err) if err else (True, "ok")
 
 
-def make_grader(body):
+def make_grader(body, allowed=GRADERS):
     grader = body.get("grader") or ("json_equals" if "expected" in body and not isinstance(body["expected"], str)
                                     else "equals" if "expected" in body else "contract")
-    if grader not in GRADERS:
-        raise ApiError(422, f"grader must be one of {', '.join(GRADERS)}")
+    if grader not in allowed:
+        raise ApiError(422, f"grader must be one of {', '.join(allowed)}")
+    if "expected" in body and len(json.dumps(body["expected"])) > 65536:
+        raise ApiError(413, "expected is too large")
     if grader != "contract" and "expected" not in body:
         raise ApiError(422, f"grader '{grader}' needs 'expected'")
     g = {"type": grader}
     if grader != "contract":
         g["expected"] = body["expected"]
         if grader == "regex":
-            try:
-                re.compile(body["expected"])
-            except (re.error, TypeError) as e:
-                raise ApiError(422, f"Bad regex: {e}")
+            safe_regex(body["expected"], "grader")
     return g
 
 
@@ -166,7 +213,7 @@ def grade(grader, contract, output):
     if kind == "contains":
         return str(exp) in output
     if kind == "regex":
-        return re.search(exp, output) is not None
+        return _bounded_search(exp, output)
     if kind == "json_equals":
         try:
             return json.loads(output) == (json.loads(exp) if isinstance(exp, str) else exp)

@@ -6,9 +6,13 @@ to those tests in advance. Both the payment *and the fix* sit in escrow until th
 Part of the award rides on the fix surviving live traffic. Bots on both sides pay under limits
 their owners set once, and nobody approves individual payments.
 
+Also read **[PAYMENTS.md](PAYMENTS.md)** (pricing, rails, unit economics, the path to real money)
+and **[SECURITY.md](SECURITY.md)** (the audit: what was attacked, what was fixed, what's still a
+residual risk).
+
 ```bash
 cd services/auto-body-shop
-python3 test_server.py                         # 25 end-to-end tests, stdlib only, no setup
+python3 test_server.py                         # 42 end-to-end tests, stdlib only, no setup
 ABS_ADMIN_KEY=$(openssl rand -hex 32) ABS_RUNNER=command ABS_RUNNER_CMD="python3 my_agent_runner.py" \
   python3 server.py                            # :8090
 ```
@@ -40,7 +44,8 @@ assume the person fixing the agent is the person who owns it:
 | Test ≠ production | Part of the award (the *warranty*, 30% by default) is held back while the fix runs as a sticky canary on a slice of live sessions. A one-sided two-proportion z-test on verified failures promotes it or rolls it back automatically. | `_decide_rollout`, `_resolve_warranty` |
 | Owner fakes canary failures to claw back the warranty | A rollback only opens a *claim*. The referee re-runs the failing live inputs on both the fix and the old version, and refunds only if the harm reproduces. Deployment safety still wins: the canary is rolled back either way. The money follows reproducible evidence. | `_run_warranty` |
 | Fixes that break other things | Guards (a sample of verified passes) and *regressions* (every failure a past repair fixed) are hidden must-pass cases. A single regression makes a submission ineligible. Each repair raises the bar for the next. | `_settle` |
-| Junk submissions | Every submission pays the referee's model costs up front. It's refunded only if the referee itself breaks. | `submit`, `_evaluate` |
+| Junk submissions | Every submission pays for its own scoring: held at the maximum, captured at the metered model cost plus margin, and fully released if the referee itself breaks. | `submit`, `_evaluate`, `ledger.hold` |
+| A "fix" that adds tools or swaps the model | A fix may change only the instructions and examples, unless the owner's bounty allows more (`mutable_fields`). Settlement records a diff of exactly what changed. | `submit`, `config_changes` |
 
 Pricing is **no cure, no pay**, as in marine salvage. Award = reward × min(fixed, required) /
 required, where `required` = ⌈threshold × hidden failures⌉. That comes to zero for no fixes, full for
@@ -97,8 +102,16 @@ combination and didn't find it. That's not proof it doesn't exist.
 ## Using it
 
 **Owner (once):** `POST /v1/accounts` → owner key. `POST /v1/agents` with the config, the output
-contract and the policy → agent key. `POST /v1/mandates` to let the agent fund its own repairs.
-Fund the account.
+contract and the policy → agent key. Set `policy.value_per_failure` (what one failure costs you)
+and `GET /v1/agents/{id}/quote` shows what your failures cost and what a repair is worth.
+`POST /v1/mandates` lets the agent fund its own repairs; `auto_bounty.amount: "auto"` prices each
+bounty from the quote. Fund the account (card via Stripe, or USDC via x402). `/dashboard` shows
+all of it, including a full statement, on a phone.
+
+**No market needed on day one:** the owner can submit to their own bounty (self-repair). The
+whole verified pipeline (hidden tests, regressions, canary) works with zero outside repairers;
+the reward just comes back, with no take. Bounties can also be private (`private_to`), for
+agents whose traffic is sensitive.
 
 **Agent (every run):** use `client.py`. It caches the config on disk with ETag revalidation and
 keeps serving the last good one if the shop is unreachable, so this service is never in your
@@ -128,7 +141,10 @@ should use `command`.
 | `ABS_PORT`, `ABS_HOST`, `ABS_DB` | `8090`, `0.0.0.0`, `data/autobodyshop.db` | |
 | `ABS_ADMIN_KEY` | unset | Needed for grants, withdrawal payouts and `/v1/admin/ledger`. `ABS_ENV=production` refuses to start without it. |
 | `ABS_RUNNER`, `ABS_RUNNER_CMD`, `ABS_RUNNER_TIMEOUT` | `none` | The referee's runner, see above. |
-| `ABS_FEE_PER_RUN` | `2000` | Referee fee per case run, in atomic units ($0.002 in USDC). Set it at or above your model cost. |
+| `ABS_MAX_COST_PER_RUN` | `20000` | Most one referee model call may cost ($0.02). Sizes holds, and the Claude runner clamps `max_tokens` so a call can't cost more. |
+| `ABS_COMPUTE_MARGIN_BPS` | `2000` | Margin on metered model cost (20%). |
+| `ABS_UNMETERED_COST_PER_RUN` | `2000` | Flat charge per run for runners that can't report cost. `ABS_RUNNER_REPORTS_COST=1` lets a command runner report its own. |
+| `ABS_MODEL_PRICES` | built in | Per-model USD per million tokens, e.g. `{"my-model": [3, 15]}`. |
 | `ABS_TAKE_BPS` | `1000` | Platform share of each award (10%). |
 | `ABS_EVAL_TRIALS` | `1` | Runs per case (odd); majority vote damps model nondeterminism. |
 | `ABS_VISIBLE_FRACTION` | `0.5` | Share of each case group published to repairers. |
@@ -136,14 +152,17 @@ should use `command`.
 | `ABS_WARRANTY_SAMPLE` | `20` | Live failures re-run to verify a warranty claim. |
 | `ABS_REAL_MONEY` | unset | See below. |
 | `ABS_X402_FACILITATOR_URL`, `ABS_X402_PAY_TO`, `ABS_X402_NETWORK`, `ABS_X402_ASSET`, `ABS_X402_EXTRA`, `ABS_PUBLIC_URL` | Base mainnet USDC | x402 deposit terms. |
-| `ABS_RATE_PER_MIN`, `ABS_SIGNUPS_PER_HOUR`, `ABS_TRUST_PROXY` | `1200`, `20`, unset | Per-key limit; per-IP signup limit; trust `X-Forwarded-For`. |
+| `ABS_STRIPE_SECRET_KEY`, `ABS_STRIPE_WEBHOOK_SECRET`, `ABS_STRIPE_API` | unset | Card top-ups. |
+| `ABS_PAYOUT_CMD`, `ABS_PAYOUT_ASSET`, `ABS_AUTO_PAYOUT_MAX`, `ABS_AUTO_PAYOUT_DAILY`, `ABS_PAYOUT_COOLING_S`, `ABS_FUNDS_AGE_S` | unset, `USDC`, `0`, `0`, 24h, 7d | Automatic payouts; see PAYMENTS.md. With a max of 0, every payout waits for the operator. |
+| `ABS_RATE_PER_MIN`, `ABS_SIGNUPS_PER_HOUR`, `ABS_TRUST_PROXY` | `1200`, `20`, unset | Per-key limit; per-IP signup limit; trust the proxy-appended `X-Forwarded-For` entry. |
 | `ABS_TICK_S`, `ABS_CONFIG_MAX_AGE`, `ABS_MAX_FIELD_BYTES` | `5`, `30`, `65536` | |
 
 **Money.** Off by default, following the same wall as the matching engine's
 `IKENGA_REAL_MONEY`. Without `ABS_REAL_MONEY=1` the only money is admin-granted play credits,
-which can't be withdrawn. With it, grants are disabled (every unit must come from an x402
-deposit), and withdrawals become requests the operator pays out and marks by hand. Holding one
-party's money to pay another is money transmission: read `docs/COMPLIANCE-NOTES.md` first.
+which can't be withdrawn. With it, grants are disabled (every unit must come from an x402 or
+Stripe deposit), and withdrawals pay out automatically only within the rules in PAYMENTS.md;
+everything else waits for the operator. Holding one party's money to pay another is money
+transmission: read `docs/COMPLIANCE-NOTES.md` first.
 
 ## Trust boundaries you should know about
 
@@ -159,12 +178,19 @@ party's money to pay another is money transmission: read `docs/COMPLIANCE-NOTES.
   makes a habit of it visible.
 - **The canary rolls back on owner-reported telemetry.** That's intentional (safety first); only
   the *warranty money* needs reproducible evidence.
+- **A fix is text written by a stranger.** A hidden trigger phrase passes any test set. Read the
+  `changes` diff before promoting third-party fixes, and keep `auto_promote` for agents where an
+  instruction change can't do real damage.
+- **The referee runs untrusted instructions.** Point `ABS_RUNNER=command` at an agent with
+  sandboxed or mocked tools, never production credentials.
+- **Run it behind TLS.** API keys are bearer tokens.
 - **Scale:** one process, one SQLite file, one referee thread. Fine for many agents at modest
   volume; not a multi-node deployment. Traces are kept forever; add pruning before that bites.
 
 ## What's verified, and what isn't
 
-Verified by `test_server.py` (25 tests, real HTTP):
+Verified by `test_server.py` (42 tests, real HTTP) and `contracts/test/test_repair_escrow.py`
+(10 tests on an in-memory EVM):
 - The full loop, with no human approving anything.
 - Commitment and split recomputed from the reveal.
 - Exact payout arithmetic, with the ledger summing to zero after every money test.
@@ -178,6 +204,9 @@ Verified by `test_server.py` (25 tests, real HTTP):
 - Signup rate limits.
 - The client keeping an agent running with the shop down.
 - `kill -9` recovery mid-bounty.
+- Value-based pricing, metered holds and captures, self-repair, private bounties, idempotent
+  retries, Stripe top-ups, disputes, and every automatic payout rule.
+- A regression test for each security audit finding (SECURITY.md).
 
 Not verified here:
 - The Docker image was never built; the build environment had no Docker daemon. It was tested
@@ -185,4 +214,7 @@ Not verified here:
 - The Claude runner and the repair bot's Claude proposer were checked against the real
   `anthropic` SDK (1.8.0), pointed at a local stand-in API, not against the live API.
 - x402 was tested against a simulated facilitator that follows the published v2 request and
-  response shapes, not a live one on-chain.
+  response shapes, not a live one on-chain. Stripe was tested with correctly signed webhooks
+  and a stubbed Checkout API, not live Stripe.
+- `RepairEscrow.sol` compiles and passes its tests on a local EVM. It has not been deployed to
+  a testnet or audited by a third party.

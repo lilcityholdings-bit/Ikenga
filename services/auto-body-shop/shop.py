@@ -32,6 +32,7 @@ The loop, end to end
 8. Every failure a winning fix repaired becomes a permanent *regression* case. Each repair
    raises the bar that future repairs must clear.
 """
+import difflib
 import json
 import math
 import queue
@@ -44,13 +45,24 @@ import ledger
 from db import ApiError, canonical, sha256
 
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+CONFIG_FIELDS = ("system_instruction", "examples", "params", "model", "tools")
+# What an outside repairer may change unless the owner opts in to more. Letting a stranger swap
+# the agent's tools or model would let a "fix" add an exfiltration tool or point the referee at
+# the most expensive model; the instruction and examples are what repair is about.
+DEFAULT_MUTABLE = ("system_instruction", "examples")
 Z_INTERIM, Z_FINAL, MIN_INTERIM = 2.576, 1.645, 30
 
 DEFAULT_POLICY = {
-    "auto_bounty": None,   # {"amount", "threshold", "warranty_bps", "duration_s", "warranty_s", "min_failures"}
+    "auto_bounty": None,   # bounty terms + "min_failures"; amount may be "auto" (priced from value_per_failure)
     "auto_promote": False,
     "canary": {"fraction": 0.1, "min_samples": 200, "duration_s": 7 * 86400},
+    # Pricing: what one failed run costs the owner (refund, human escalation, lost customer), in
+    # atomic units. With it, the shop can price a repair from the failures it would prevent.
+    "value_per_failure": None,
+    "payback_days": 30,    # horizon over which a repair should pay for itself
+    "offer_share": 0.5,    # share of the expected savings offered to the repairer
 }
+QUOTE_WINDOW_S = 7 * 86400
 
 
 def _num(body, key, default, lo, hi, cast=float):
@@ -99,23 +111,57 @@ def normalize_policy(p, base=None):
         policy["canary"] = {"fraction": _num(c, "fraction", 0.1, 0.01, 0.5),
                             "min_samples": _num(c, "min_samples", 200, MIN_INTERIM, 10**7, int),
                             "duration_s": _num(c, "duration_s", 7 * 86400, 60, 90 * 86400)}
+    if "value_per_failure" in p:
+        policy["value_per_failure"] = None if p["value_per_failure"] is None else _num(p, "value_per_failure", None, 1, 10**12, int)
+    if "payback_days" in p:
+        policy["payback_days"] = _num(p, "payback_days", 30, 1, 365)
+    if "offer_share" in p:
+        policy["offer_share"] = _num(p, "offer_share", 0.5, 0.01, 1.0)
     if "auto_bounty" in p:
         ab = p["auto_bounty"]
-        policy["auto_bounty"] = None if ab is None else dict(bounty_terms(ab), min_failures=_num(
+        policy["auto_bounty"] = None if ab is None else dict(bounty_terms(ab, allow_auto=True), min_failures=_num(
             ab, "min_failures", 5, 1, 10000, int))
+    if policy["auto_bounty"] and policy["auto_bounty"]["amount"] == "auto" and not policy["value_per_failure"]:
+        raise ApiError(422, "auto_bounty.amount 'auto' needs policy.value_per_failure")
     return policy
 
 
-def bounty_terms(b):
+def bounty_terms(b, allow_auto=False):
     if not isinstance(b, dict):
         raise ApiError(422, "bounty terms must be an object")
-    return {"amount": _num(b, "amount", None, 1, 10**15, int),
+    private = b.get("private_to") or []
+    if not isinstance(private, list) or len(private) > 50 or not all(isinstance(x, str) for x in private):
+        raise ApiError(422, "private_to must be a list of up to 50 account ids")
+    auto = allow_auto and b.get("amount") == "auto"
+    return {"amount": "auto" if auto else _num(b, "amount", None, 1, 10**15, int),
+            "min_amount": _num(b, "min_amount", 1, 1, 10**15, int),
+            "max_amount": _num(b, "max_amount", 10**15, 1, 10**15, int),
+            "private_to": sorted(set(private)),
             "threshold": _num(b, "threshold", 0.5, 0.01, 1.0),
             "warranty_bps": _num(b, "warranty_bps", 3000, 0, 10000, int),
             "duration_s": _num(b, "duration_s", 86400, 60, 30 * 86400),
             "warranty_s": _num(b, "warranty_s", 7 * 86400, 60, 90 * 86400),
             "max_submissions": _num(b, "max_submissions", 3, 1, 100, int),
-            "share_config": bool(b.get("share_config", True))}
+            "share_config": bool(b.get("share_config", True)),
+            "mutable_fields": _mutable(b.get("mutable_fields"))}
+
+
+def _mutable(fields):
+    if fields is None:
+        return list(DEFAULT_MUTABLE)
+    if not isinstance(fields, list) or not set(fields) <= set(CONFIG_FIELDS) or "system_instruction" not in fields:
+        raise ApiError(422, f"mutable_fields must be a list drawn from {', '.join(CONFIG_FIELDS)}, including system_instruction")
+    return sorted(set(fields))
+
+
+def config_changes(old, new):
+    """What a fix changes, for the owner to read before (or after) it goes live: which fields,
+    and a line diff of the instruction. A fix is text written by a stranger; a hidden
+    instruction in it would pass any test set, so it has to be visible."""
+    changed = [f for f in CONFIG_FIELDS if old.get(f) != new.get(f)]
+    diff = list(difflib.unified_diff(old["system_instruction"].splitlines(), new["system_instruction"].splitlines(),
+                                     "before", "after", lineterm="", n=1))
+    return {"fields": changed, "instruction_diff": "\n".join(diff)[:20000]}
 
 
 def z_score(n_c, f_c, n_b, f_b):
@@ -164,10 +210,10 @@ class Shop:
 
     def resolve_key(self, secret):
         with self.store.tx() as db:
-            row = db.execute("SELECT id, account_id, scope, agent_id FROM keys WHERE hash=? AND revoked=0",
-                             (sha256(secret),)).fetchone()
+            row = db.execute("SELECT k.id, k.account_id, k.scope, k.agent_id, a.frozen FROM keys k JOIN accounts a"
+                             " ON a.id=k.account_id WHERE k.hash=? AND k.revoked=0", (sha256(secret),)).fetchone()
         return None if row is None else {"key_id": row["id"], "account_id": row["account_id"],
-                                         "scope": row["scope"], "agent_id": row["agent_id"]}
+                                         "scope": row["scope"], "agent_id": row["agent_id"], "frozen": bool(row["frozen"])}
 
     def new_bot_key(self, principal, body):
         agent_id = body.get("agent_id")
@@ -356,6 +402,39 @@ class Shop:
                               (agent_id, after)).fetchall()
         return [dict(r, detail=json.loads(r["detail"])) for r in rows]
 
+    def quote(self, principal, agent_id, threshold=None):
+        """What this agent's failures cost, and what a repair is worth. It is the basis of
+        value-based pricing: a bounty is a share of the savings it's expected to produce, so the
+        owner never has to guess a number and the repairer knows what's at stake.
+
+            failures/day   verified failures over the last 7 days (or since the first trace)
+            savings        value_per_failure x failures/day x payback_days x threshold
+            bounty         savings x offer_share   (then clamped to the policy's min/max)
+        """
+        a = self.agent(agent_id, principal)
+        p = a["policy"]
+        since = self.now() - QUOTE_WINDOW_S
+        with self.store.tx() as db:
+            r = db.execute("SELECT COUNT(*) n, COALESCE(SUM(verdict='fail'), 0) f, MIN(created_at) first FROM traces"
+                           " WHERE agent_id=? AND created_at>=?", (agent_id, since)).fetchone()
+        # Never divide by less than a day: a new agent with a few early failures would otherwise be
+        # extrapolated to hundreds a day, and an "auto" bounty would overpay for it.
+        span_days = max(1.0, min(7.0, (self.now() - r["first"]) / 86400)) if r["first"] else None
+        fpd = r["f"] / span_days if span_days else 0.0
+        out = {"agent_id": agent_id, "window_days": round(span_days, 3) if span_days else 0, "runs": r["n"],
+               "verified_failures": r["f"], "failure_rate": r["f"] / r["n"] if r["n"] else None,
+               "failures_per_day": round(fpd, 3), "value_per_failure": p["value_per_failure"],
+               "payback_days": p["payback_days"], "offer_share": p["offer_share"]}
+        if p["value_per_failure"]:
+            t = threshold if threshold is not None else ((p["auto_bounty"] or {}).get("threshold") or 0.5)
+            daily = p["value_per_failure"] * fpd
+            savings = daily * p["payback_days"] * t
+            out.update({"failure_cost_per_day": round(daily), "threshold": t,
+                        "expected_savings": round(savings), "suggested_bounty": round(savings * p["offer_share"]),
+                        "owner_net_if_full_award": round(savings * (1 - p["offer_share"])),
+                        "formula": "value_per_failure x failures_per_day x payback_days x threshold x offer_share"})
+        return out
+
     # ---- traces, verdicts, cases ------------------------------------------------------------
 
     def ingest(self, principal, body):
@@ -407,7 +486,6 @@ class Shop:
         verdict = body.get("verdict")
         if verdict not in ("pass", "fail"):
             raise ApiError(422, "verdict must be pass or fail")
-        grader = contracts.make_grader(body) if ("expected" in body or "grader" in body) else None
         with self.store.tx() as db:
             t = db.execute("SELECT * FROM traces WHERE feedback_hash=?", (sha256(token),)).fetchone()
             if t is None:
@@ -416,6 +494,10 @@ class Shop:
             if principal["agent_id"] == t["agent_id"]:
                 raise ApiError(403, "An agent can't grade its own output")
             source = "owner" if principal["account_id"] == owner else "consumer"
+            # Consumers can't attach regex graders: a pattern from an outsider would be run by the
+            # referee, and a catastrophic one could stall it (see contracts.safe_regex).
+            grader = (contracts.make_grader(body, contracts.GRADERS if source == "owner" else contracts.CONSUMER_GRADERS)
+                      if ("expected" in body or "grader" in body) else None)
             db.execute("UPDATE traces SET verdict=?, verdict_source=?, feedback_hash=NULL WHERE id=?",
                        (verdict, source, t["id"]))
             case = None
@@ -439,7 +521,15 @@ class Shop:
         if self.runner is None:
             raise ApiError(503, "No referee runner configured (set ABS_RUNNER); bounties can't be scored")
         a = self.agent(agent_id, principal)
-        terms = bounty_terms(body)
+        terms = bounty_terms(body, allow_auto=True)
+        pricing = None
+        if terms["amount"] == "auto":
+            q = self.quote(principal, agent_id, terms["threshold"])
+            if "suggested_bounty" not in q:
+                raise ApiError(422, "amount 'auto' needs policy.value_per_failure")
+            terms["amount"] = max(terms["min_amount"], min(terms["max_amount"], q["suggested_bounty"]))
+            pricing = {k: q[k] for k in ("failures_per_day", "value_per_failure", "payback_days", "offer_share",
+                                         "expected_savings", "suggested_bounty")}
         s = self.s
         with self.store.tx() as db:
             if db.execute("SELECT 1 FROM bounties WHERE agent_id=? AND status IN ('PREPARING','OPEN')", (agent_id,)).fetchone():
@@ -466,25 +556,27 @@ class Shop:
                      for c in group]
             runs = len(cases) * s["trials"]
             terms.update({"agent_id": agent_id, "baseline_version": base["version"], "contract": a["contract"],
-                          "fee_per_run": s["fee_per_run"], "take_bps": s["take_bps"], "trials": s["trials"],
+                          "pricing": pricing, "max_cost_per_run": s["max_cost_per_run"],
+                          "margin_bps": s["margin_bps"], "take_bps": s["take_bps"], "trials": s["trials"],
                           "max_regressions": 0, "visible_fraction": s["visible_fraction"],
                           "split_rule": "cases ranked by sha256(seed:case_id); first ceil(n*visible_fraction) of each role visible (at most n-1)"})
             listing = sorted([{"case_id": c["id"], "role": role, "split": split[c["id"]],
                                "content_hash": sha256(canonical({"input": c["input"], "grader": json.loads(c["grader"])}))}
                               for c, role in cases], key=lambda x: x["case_id"])
             commitment = sha256(canonical({"terms": terms, "cases": listing, "seed": seed}))
-            baseline_fee = runs * s["fee_per_run"]
+            baseline_fee = self.max_fee(runs)
             bounty_id = db.execute(
                 "INSERT INTO bounties (agent_id, account_id, amount, baseline_fee, terms, commitment, seed,"
                 " baseline_version, status, created_at) VALUES (?,?,?,?,?,?,?,?,'PREPARING',?)",
                 (agent_id, a["account_id"], terms["amount"], baseline_fee, canonical(terms), commitment, seed,
                  base["version"], self.now())).lastrowid
-            # One mandate check covers the whole cost of posting: the reward plus scoring the baseline.
+            # One mandate check covers the whole cost of posting: the reward plus the most that
+            # scoring the baseline can cost. The scoring is held, and captured at metered cost later.
             mandate_id = ledger.authorize(self.store, principal, terms["amount"] + baseline_fee, "bounty", agent_id)
             ledger.transfer(self.store, ledger.acct(a["account_id"]), f"escrow:bounty:{bounty_id}", terms["amount"],
                             "bounty_escrow", f"bounty:{bounty_id}", mandate_id)
-            ledger.transfer(self.store, ledger.acct(a["account_id"]), "platform:fees", baseline_fee,
-                            "referee_fee", f"bounty:{bounty_id}:baseline", mandate_id)
+            ledger.transfer(self.store, ledger.acct(a["account_id"]), f"hold:bounty:{bounty_id}:baseline", baseline_fee,
+                            "hold", f"bounty:{bounty_id}:baseline", mandate_id)
             for c, role in cases:
                 entry = next(x for x in listing if x["case_id"] == c["id"])
                 db.execute("INSERT INTO bounty_cases (bounty_id, case_id, split, role, content_hash) VALUES (?,?,?,?,?)",
@@ -496,7 +588,14 @@ class Shop:
                                            "cases": len(cases)}, agent_id=agent_id, account_id=a["account_id"])
         self.jobs.put(("baseline", bounty_id))
         return {"bounty_id": bounty_id, "status": "PREPARING", "commitment": commitment, "terms": terms,
-                "baseline_fee": baseline_fee, "mandate_id": mandate_id}
+                "baseline_fee_held": baseline_fee, "mandate_id": mandate_id}
+
+    def max_fee(self, runs):
+        """The most `runs` model calls can be charged: the per-run cost cap plus margin."""
+        return math.ceil(runs * self.s["max_cost_per_run"] * (10000 + self.s["margin_bps"]) / 10000)
+
+    def fee_for(self, cost):
+        return math.ceil(cost * (10000 + self.s["margin_bps"]) / 10000)
 
     def _bounty(self, db, bounty_id):
         b = db.execute("SELECT * FROM bounties WHERE id=?", (bounty_id,)).fetchone()
@@ -508,12 +607,20 @@ class Shop:
         with self.store.tx() as db:
             rows = db.execute("SELECT id, agent_id, amount, status, closes_at, commitment, terms FROM bounties"
                               " WHERE status=? ORDER BY id DESC LIMIT 200", (status,)).fetchall()
-        return [dict(r, terms=json.loads(r["terms"])) for r in rows]
+        # Private bounties (their cases may hold sensitive data) never appear in the public list.
+        return [dict(r, terms=t) for r in rows for t in [json.loads(r["terms"])] if not t.get("private_to")]
+
+    @staticmethod
+    def _may_see(principal, b, terms):
+        allowed = terms.get("private_to") or []
+        return not allowed or principal["account_id"] == b["account_id"] or principal["account_id"] in allowed
 
     def bounty_view(self, principal, bounty_id):
         with self.store.tx() as db:
             b = self._bounty(db, bounty_id)
             terms = json.loads(b["terms"])
+            if not self._may_see(principal, b, terms):
+                raise ApiError(404, "Bounty not found")
             rows = db.execute("SELECT bc.case_id, bc.split, bc.role, bc.content_hash, c.input, c.grader FROM bounty_cases bc"
                               " JOIN cases c ON c.id=bc.case_id WHERE bc.bounty_id=? ORDER BY bc.case_id", (bounty_id,)).fetchall()
             base_cfg = db.execute("SELECT config FROM configs WHERE agent_id=? AND version=?",
@@ -539,27 +646,41 @@ class Shop:
         return out
 
     def submit(self, principal, bounty_id, body):
-        config = normalize_config(body.get("config"))
+        raw = body.get("config")
+        if not isinstance(raw, dict):
+            raise ApiError(422, "config must be an object")
         with self.store.tx() as db:
             b = self._bounty(db, bounty_id)
             if b["status"] != "OPEN" or self.now() >= b["closes_at"]:
                 raise ApiError(409, f"Bounty {bounty_id} is not open for submissions")
-            if principal["account_id"] == b["account_id"]:
-                raise ApiError(403, "The bounty's owner can't submit to it")
             terms = json.loads(b["terms"])
+            if not self._may_see(principal, b, terms):
+                raise ApiError(404, "Bounty not found")
+            base = json.loads(db.execute("SELECT config FROM configs WHERE agent_id=? AND version=?",
+                                         (b["agent_id"], b["baseline_version"])).fetchone()[0])
+            mutable = terms.get("mutable_fields", DEFAULT_MUTABLE)
+            # Leaving a locked field out means "keep it"; only an explicit different value is refused.
+            config = normalize_config({f: raw[f] if (f in raw) else base.get(f) for f in CONFIG_FIELDS})
+            locked = [f for f in CONFIG_FIELDS if f not in mutable and config.get(f) != base.get(f)]
+            if locked:
+                raise ApiError(422, f"This bounty doesn't allow changing {', '.join(locked)}; "
+                                    f"copy them from the baseline config")
+            # The owner may submit too ("self-repair"): the whole verified pipeline (hidden tests,
+            # regressions, canary) is useful with no outside repairers at all, and if the owner
+            # wins, the reward simply comes back with no take.
             n = db.execute("SELECT COUNT(*) FROM submissions WHERE bounty_id=? AND account_id=?",
                            (bounty_id, principal["account_id"])).fetchone()[0]
             if n >= terms["max_submissions"]:
                 raise ApiError(429, f"Submission limit ({terms['max_submissions']}) reached for this bounty")
             runs = db.execute("SELECT COUNT(*) FROM bounty_cases WHERE bounty_id=?", (bounty_id,)).fetchone()[0] * terms["trials"]
-            fee = runs * terms["fee_per_run"]
+            fee = self.max_fee(runs)
             sid = db.execute("INSERT INTO submissions (bounty_id, account_id, config, fingerprint, status, fee, created_at)"
                              " VALUES (?,?,?,?,'EVALUATING',?,?)", (bounty_id, principal["account_id"], canonical(config),
                                                                     sha256(canonical(config)), fee, self.now())).lastrowid
-            mandate_id = ledger.spend(self.store, principal, fee, "eval_fee", "platform:fees", "referee_fee",
-                                      f"submission:{sid}")
+            mandate_id = ledger.hold(self.store, principal, fee, "eval_fee", f"submission:{sid}", b["agent_id"]
+                                     if principal["account_id"] == b["account_id"] else None)
         self.jobs.put(("submission", sid))
-        return {"submission_id": sid, "status": "EVALUATING", "fee": fee, "mandate_id": mandate_id}
+        return {"submission_id": sid, "status": "EVALUATING", "fee_held": fee, "mandate_id": mandate_id}
 
     def submission_view(self, principal, sid):
         with self.store.tx() as db:
@@ -568,6 +689,7 @@ class Shop:
                 raise ApiError(404, "Submission not found")
             b = self._bounty(db, s["bounty_id"])
         out = {"submission_id": sid, "bounty_id": s["bounty_id"], "status": s["status"], "error": s["error"],
+               "fee": s["fee"], "metered_cost": s["cost"],
                "visible_result": json.loads(s["visible_result"]) if s["visible_result"] else None,
                "bounty_status": b["status"]}
         if b["status"] in ("SETTLED", "NO_WINNER"):
@@ -589,9 +711,8 @@ class Shop:
                     if kind == "submission":
                         s = db.execute("SELECT * FROM submissions WHERE id=?", (ident,)).fetchone()
                         if s is not None and s["status"] == "EVALUATING":
-                            db.execute("UPDATE submissions SET status='FAILED', error=? WHERE id=?", (repr(e)[:500], ident))
-                            ledger.transfer(self.store, "platform:fees", ledger.acct(s["account_id"]), s["fee"],
-                                            "referee_fee_refund", f"submission:{ident}")
+                            ledger.settle_hold(self.store, f"submission:{ident}", s["account_id"], 0, "platform:fees", "referee_fee")
+                            db.execute("UPDATE submissions SET status='FAILED', error=?, fee=0 WHERE id=?", (repr(e)[:500], ident))
                     elif kind == "baseline":
                         self._fail_bounty(db, ident, repr(e)[:500])
                     else:
@@ -609,12 +730,14 @@ class Shop:
     def _evaluate(self, config, cases, contract, trials):
         """{case_id: pass}. With several trials a case passes on a strict majority, which damps
         model nondeterminism instead of rewarding a lucky sample."""
-        results, errors, last = {}, 0, None
+        results, errors, last, cost = {}, 0, None, 0
         for c in cases:
             wins = 0
             for _ in range(trials):
                 try:
                     out = self.runner(config, c["input"])
+                    out, run_cost = out if isinstance(out, tuple) else (out, None)
+                    cost += self.s["unmetered_cost_per_run"] if run_cost is None else min(run_cost, self.s["max_cost_per_run"])
                 except Exception as e:
                     out, errors, last = None, errors + 1, e
                 wins += contracts.grade(json.loads(c["grader"]), contract, out)
@@ -623,7 +746,7 @@ class Shop:
             # Every single run crashed: that's the referee's runner failing (bad credentials, model
             # down), not the config. Scoring it as "fixed nothing" would keep a fee for no work.
             raise RuntimeError(f"runner failed on every case: {last!r}")
-        return results
+        return results, cost
 
     def _run_baseline(self, bounty_id):
         with self.store.tx() as db:
@@ -633,10 +756,13 @@ class Shop:
             cfg = json.loads(db.execute("SELECT config FROM configs WHERE agent_id=? AND version=?",
                                         (b["agent_id"], b["baseline_version"])).fetchone()[0])
         terms = json.loads(b["terms"])
-        results = self._evaluate(cfg, self._cases_for(bounty_id), terms["contract"], terms["trials"])
+        results, cost = self._evaluate(cfg, self._cases_for(bounty_id), terms["contract"], terms["trials"])
         with self.store.tx() as db:
-            db.execute("UPDATE bounties SET baseline_results=?, status='OPEN', closes_at=? WHERE id=? AND status='PREPARING'",
-                       (canonical(results), self.now() + terms["duration_s"], bounty_id))
+            if db.execute("UPDATE bounties SET baseline_results=?, status='OPEN', closes_at=? WHERE id=? AND status='PREPARING'",
+                          (canonical(results), self.now() + terms["duration_s"], bounty_id)).rowcount:
+                fee = ledger.settle_hold(self.store, f"bounty:{bounty_id}:baseline", b["account_id"], self.fee_for(cost),
+                                         "platform:fees", "referee_fee")
+                db.execute("UPDATE bounties SET baseline_fee=? WHERE id=?", (fee, bounty_id))
 
     def _run_submission(self, sid):
         with self.store.tx() as db:
@@ -646,7 +772,7 @@ class Shop:
             b = self._bounty(db, s["bounty_id"])
         terms = json.loads(b["terms"])
         cases = self._cases_for(b["id"])
-        results = self._evaluate(json.loads(s["config"]), cases, terms["contract"], terms["trials"])
+        results, cost = self._evaluate(json.loads(s["config"]), cases, terms["contract"], terms["trials"])
         split = {str(c["case_id"]): c["split"] for c in cases}
         visible = {k: v for k, v in results.items() if split[k] == "visible"}
         hidden = {k: v for k, v in results.items() if split[k] == "hidden"}
@@ -654,8 +780,11 @@ class Shop:
         vis_summary = {"passed": sum(visible.values()), "total": len(visible),
                        "cases": [{"case_id": int(k), "pass": v, "baseline_pass": baseline.get(k)} for k, v in visible.items()]}
         with self.store.tx() as db:
-            db.execute("UPDATE submissions SET status='EVALUATED', visible_result=?, hidden_result=? WHERE id=?",
-                       (canonical(vis_summary), canonical(hidden), sid))
+            if db.execute("SELECT status FROM submissions WHERE id=?", (sid,)).fetchone()[0] == "EVALUATING":
+                fee = ledger.settle_hold(self.store, f"submission:{sid}", s["account_id"], self.fee_for(cost),
+                                         "platform:fees", "referee_fee")
+                db.execute("UPDATE submissions SET status='EVALUATED', visible_result=?, hidden_result=?, fee=?, cost=?"
+                           " WHERE id=?", (canonical(vis_summary), canonical(hidden), fee, cost, sid))
 
     def _fail_bounty(self, db, bounty_id, why):
         b = db.execute("SELECT * FROM bounties WHERE id=?", (bounty_id,)).fetchone()
@@ -664,8 +793,7 @@ class Shop:
         ledger.transfer(self.store, f"escrow:bounty:{bounty_id}", ledger.acct(b["account_id"]), b["amount"],
                         "bounty_refund", f"bounty:{bounty_id}")
         if b["status"] == "PREPARING":
-            ledger.transfer(self.store, "platform:fees", ledger.acct(b["account_id"]), b["baseline_fee"],
-                            "referee_fee_refund", f"bounty:{bounty_id}:baseline")
+            ledger.settle_hold(self.store, f"bounty:{bounty_id}:baseline", b["account_id"], 0, "platform:fees", "referee_fee")
         db.execute("UPDATE bounties SET status='FAILED', result=?, settled_at=? WHERE id=?",
                    (canonical({"error": why}), self.now(), bounty_id))
         db.execute("UPDATE cases SET bounty_id=NULL WHERE bounty_id=?", (bounty_id,))
@@ -706,9 +834,11 @@ class Shop:
                        (canonical(result), self.now(), b["id"]))
             return None
         sub, n_fixed, fixed = best
+        self_repair = sub["account_id"] == b["account_id"]
         award = amount * min(n_fixed, required) // required
-        take = award * terms["take_bps"] // 10000
-        warranty = (award - take) * terms["warranty_bps"] // 10000
+        # A self-repair just returns the owner's own money: no take, and no warranty to hold.
+        take = 0 if self_repair else award * terms["take_bps"] // 10000
+        warranty = 0 if self_repair else (award - take) * terms["warranty_bps"] // 10000
         pay_now = award - take - warranty
         refund = amount - award
         ref = f"bounty:{b['id']}"
@@ -716,13 +846,16 @@ class Shop:
         ledger.transfer(self.store, escrow, "platform:fees", take, "platform_take", ref)
         ledger.transfer(self.store, escrow, f"escrow:warranty:{b['id']}", warranty, "warranty_hold", ref)
         ledger.transfer(self.store, escrow, ledger.acct(b["account_id"]), refund, "bounty_refund", ref)
-        version = self._insert_config(db, b["agent_id"], json.loads(sub["config"]), "STAGED", f"bounty:{b['id']}",
-                                      b["baseline_version"])
+        new_cfg = json.loads(sub["config"])
+        base_cfg = json.loads(db.execute("SELECT config FROM configs WHERE agent_id=? AND version=?",
+                                         (b["agent_id"], b["baseline_version"])).fetchone()[0])
+        version = self._insert_config(db, b["agent_id"], new_cfg, "STAGED", f"bounty:{b['id']}", b["baseline_version"])
+        result["changes"] = config_changes(base_cfg, new_cfg)
         for k in fixed:
             db.execute("UPDATE cases SET kind='regression' WHERE id=?", (int(k),))
         result["winner"] = {"submission_id": sub["id"], "account_id": sub["account_id"], "fixed": n_fixed,
                             "version": version, "award": award, "take": take, "paid_now": pay_now,
-                            "warranty": warranty, "refund": refund}
+                            "warranty": warranty, "refund": refund, "self_repair": self_repair}
         db.execute("UPDATE bounties SET status='SETTLED', result=?, settled_at=?, warranty_state=?, warranty_until=? WHERE id=?",
                    (canonical(result), self.now(), "HELD" if warranty > 0 else None,
                     self.now() + terms["warranty_s"], b["id"]))
@@ -736,7 +869,7 @@ class Shop:
                        " started_at, ends_at) VALUES (?,?,?,?,?,?,'RUNNING',?,?)",
                        (b["agent_id"], version, active["version"], c["fraction"], c["min_samples"], b["id"],
                         self.now(), ends))
-        return result["winner"]
+        return dict(result["winner"], changes=result["changes"])
 
     def start_rollout(self, principal, agent_id, body):
         a = self.agent(agent_id, principal, owner_only=True)
@@ -831,8 +964,11 @@ class Shop:
             if b["warranty_state"] != "VERIFYING":
                 return
             ro = db.execute("SELECT * FROM rollouts WHERE bounty_id=? ORDER BY id DESC LIMIT 1", (bounty_id,)).fetchone()
+            # Only graders the owner didn't write: the owner is the one claiming the warranty, and a
+            # grader demanding the old version's exact wording would make any change "reproduce".
             traces = db.execute(
-                "SELECT t.input, c.grader FROM traces t LEFT JOIN cases c ON c.trace_id=t.id WHERE t.agent_id=? AND"
+                "SELECT t.input, CASE WHEN c.source='consumer' THEN c.grader END AS grader FROM traces t"
+                " LEFT JOIN cases c ON c.trace_id=t.id WHERE t.agent_id=? AND"
                 " t.version=? AND t.verdict='fail' AND t.input IS NOT NULL AND t.created_at>=? ORDER BY t.id DESC LIMIT ?",
                 (ro["agent_id"], ro["candidate"], ro["started_at"], self.s["warranty_sample"])).fetchall()
             cfg = {v: json.loads(db.execute("SELECT config FROM configs WHERE agent_id=? AND version=?",
@@ -840,11 +976,11 @@ class Shop:
         terms = json.loads(b["terms"])
         cases = [{"case_id": i, "input": t["input"], "grader": t["grader"] or canonical({"type": "contract"})}
                  for i, t in enumerate(traces)]
-        cand = self._evaluate(cfg[ro["candidate"]], cases, terms["contract"], terms["trials"]) if cases else {}
-        base = self._evaluate(cfg[ro["baseline"]], cases, terms["contract"], terms["trials"]) if cases else {}
+        cand, cost_c = self._evaluate(cfg[ro["candidate"]], cases, terms["contract"], terms["trials"]) if cases else ({}, 0)
+        base, cost_b = self._evaluate(cfg[ro["baseline"]], cases, terms["contract"], terms["trials"]) if cases else ({}, 0)
         reproduced = sum(1 for k in cand if not cand[k] and base[k])
         harmed = reproduced >= 1 and reproduced * 5 >= len(cases)
-        fee = 2 * len(cases) * terms["trials"] * terms["fee_per_run"]
+        fee = self.fee_for(cost_c + cost_b)
         with self.store.tx() as db:
             b = self._bounty(db, bounty_id)
             if b["warranty_state"] == "VERIFYING":
@@ -853,7 +989,8 @@ class Shop:
 
     def _auto_bounties(self):
         with self.store.tx() as db:
-            agents = db.execute("SELECT agent_id, account_id, policy FROM agents").fetchall()
+            agents = db.execute("SELECT a.agent_id, a.account_id, a.policy FROM agents a JOIN accounts x ON x.id=a.account_id"
+                                " WHERE x.frozen=0").fetchall()
         for a in agents:
             policy = json.loads(a["policy"])
             ab = policy.get("auto_bounty")

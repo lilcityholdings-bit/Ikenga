@@ -47,6 +47,8 @@ def fake_model(config, text):
         return "{broken"
     if text.startswith("live") and "BREAK_LIVE" in si:
         return "{broken"
+    if "SHOUT" in si:
+        return json.dumps({"name": text.upper()})  # valid, just different from the old version
     return json.dumps({"name": text})
 
 
@@ -74,12 +76,15 @@ class Api:
 
 
 class Harness:
-    def __init__(self, env=None, runner=fake_model):
+    def __init__(self, env=None, runner=fake_model, trust_proxy=False):
         self.clock = Clock()
-        e = {"ABS_ADMIN_KEY": ADMIN, "ABS_GUARD_EVERY": "1", "ABS_FEE_PER_RUN": "10", "ABS_RUNNER": "fake"}
+        # Metering: the fake model can't report cost, so each run is charged the flat unmetered 10
+        # units plus the 20% margin (12 per run); holds are sized at the 50-unit cap (60 per run).
+        e = {"ABS_ADMIN_KEY": ADMIN, "ABS_GUARD_EVERY": "1", "ABS_UNMETERED_COST_PER_RUN": "10",
+             "ABS_MAX_COST_PER_RUN": "50", "ABS_COMPUTE_MARGIN_BPS": "2000", "ABS_RUNNER": "fake"}
         e.update(env or {})
         self.app = server.build(os.path.join(tempfile.mkdtemp(), "abs.db"), env=e, runner=runner, clock=self.clock)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.app))
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.app, trust_proxy))
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.api = Api(self.httpd.server_address[1])
 
@@ -282,7 +287,7 @@ class Market(Base):
         n_cases = len(view["visible_cases"]) + view["hidden_case_count"]
         self.assertTrue(view["visible_cases"] and view["hidden_case_count"])
         self.assertNotIn("seed", view)
-        baseline_fee = n_cases * 10
+        baseline_fee = n_cases * 12   # metered cost + margin; the unused part of the hold came back
         self.assertEqual(h.balance(self.owner["owner_key"]), before - 100_000 - baseline_fee)
         self.assertEqual(view["baseline_config"]["system_instruction"], "Extract the name as JSON.")
 
@@ -292,12 +297,11 @@ class Market(Base):
         self.assertEqual(s, 403)  # a bot key with no mandate can't spend
         h.call("POST", "/v1/mandates", {"purpose": "eval_fee", "max_per_tx": 1000, "max_per_day": 5000}, key=r1["owner_key"])
         s, good_sub = self.submit(bot1, bid, "Extract the name as JSON. HANDLE_TRICKY")
-        self.assertEqual((s, good_sub["fee"]), (202, n_cases * 10))
+        self.assertEqual((s, good_sub["fee_held"]), (202, n_cases * 60))
         r2, bot2 = self.repairer("cheater")
         h.call("POST", "/v1/mandates", {"purpose": "any", "max_per_tx": 1000, "max_per_day": 5000}, key=r2["owner_key"])
         s, cheat_sub = self.submit(bot2, bid, "HANDLE_TRICKY BREAK_NORMAL")
         self.assertEqual(s, 202)
-        self.assertEqual(self.submit(self.owner["owner_key"], bid, "x")[0], 403)  # the owner can't bid on its own bounty
 
         vis = self.evaluated(bot1, good_sub["submission_id"])["visible_result"]
         self.assertEqual(vis["passed"], vis["total"])  # the good fix passes everything it can see
@@ -323,7 +327,7 @@ class Market(Base):
         warranty = (award - take) * 3000 // 10000
         self.assertEqual((w["award"], w["take"], w["warranty"], w["paid_now"], w["refund"]),
                          (award, take, warranty, award - take - warranty, 100_000 - award))
-        self.assertEqual(h.balance(r1["owner_key"]), 50_000 - n_cases * 10 + w["paid_now"])
+        self.assertEqual(h.balance(r1["owner_key"]), 50_000 - n_cases * 12 + w["paid_now"])
         self.assertTrue(h.ledger_ok())
 
         # Anyone can check the referee: recompute the commitment and the split from the reveal.
@@ -364,7 +368,7 @@ class Market(Base):
         self.assertEqual(h.call("GET", "/v1/config/bot_alpha", key=self.agent["agent_key"])[1]["version"], w["version"])
         h.app.shop.tick()
         self.assertEqual(h.call("GET", f"/v1/bounties/{bid}", key=r1["owner_key"])[1]["warranty"]["state"], "RELEASED")
-        self.assertEqual(h.balance(r1["owner_key"]), 50_000 - n_cases * 10 + w["paid_now"] + w["warranty"])
+        self.assertEqual(h.balance(r1["owner_key"]), 50_000 - n_cases * 12 + w["paid_now"] + w["warranty"])
         rep = h.call("GET", f"/v1/accounts/{r1['account_id']}/reputation")[1]["as_repairer"]
         self.assertEqual((rep["wins"], rep["warranties_released"]), (1, 1))
         self.assertTrue(h.ledger_ok())
@@ -457,6 +461,25 @@ class Market(Base):
         h.app.shop.tick()
         view = h.call("GET", f"/v1/bounties/{bid}", key=r1["owner_key"])[1]
         self.assertEqual(view["result"]["winner"]["account_id"], r1["account_id"])
+
+    def test_owner_written_graders_cannot_claw_back_a_warranty(self):
+        h = self.h
+        bid, r1, w = self.canary_with("Extract the name as JSON. HANDLE_TRICKY SHOUT")  # good fix, different wording
+        repairer_before = h.balance(r1["owner_key"])
+        for i in range(120):
+            sess = f"s{i}"
+            cfg = h.call("GET", f"/v1/config/bot_alpha?session={sess}", key=self.agent["agent_key"])[1]
+            out = fake_model(cfg["config"], f"live {i}")
+            t = h.trace(self.agent["agent_key"], f"live {i}", output=out, success=True, version=cfg["version"], session=sess)
+            if cfg["rollout"]["arm"] == "candidate":
+                # The owner "grades" the fix wrong for not matching the old wording exactly.
+                h.call("POST", "/v1/feedback", {"feedback_token": t["feedback_token"], "verdict": "fail",
+                                                "expected": {"name": f"live {i}"}}, key=self.owner["owner_key"])
+        self.settle_warranty(bid, r1["owner_key"])
+        ev = [e for e in h.call("GET", "/v1/agents/bot_alpha/events", key=self.owner["owner_key"])[1]["events"]
+              if e["kind"].startswith("warranty_")][-1]
+        self.assertEqual((ev["kind"], ev["detail"]["reproduced"]), ("warranty_released", 0))
+        self.assertEqual(h.balance(r1["owner_key"]), repairer_before + ev["detail"]["amount"])
 
     def test_no_winner_refunds_everything_and_returns_hidden_cases(self):
         h = self.h
@@ -630,9 +653,11 @@ class X402(Base):
         req = self.h.app.payments.requirements(1000)
         self.pay(acct["owner_key"], 1000, req)
         s, k = self.h.call("POST", "/v1/keys", {}, key=acct["owner_key"])
-        self.assertEqual(self.h.call("POST", "/v1/withdrawals", {"amount": 10, "destination": "0xme"}, key=k["key"])[0], 403)
-        s, w = self.h.call("POST", "/v1/withdrawals", {"amount": 400, "destination": "0xme"}, key=acct["owner_key"])
-        self.assertEqual((s, w["status"]), (202, "PENDING"))
+        self.assertEqual(self.h.call("POST", "/v1/withdrawals", {"amount": 10}, key=k["key"])[0], 403)
+        self.assertEqual(self.h.call("POST", "/v1/withdrawals", {"amount": 10}, key=acct["owner_key"])[0], 409)  # no destination yet
+        self.h.call("POST", "/v1/payouts/destination", {"destination": "0xme"}, key=acct["owner_key"])
+        s, w = self.h.call("POST", "/v1/withdrawals", {"amount": 400}, key=acct["owner_key"])
+        self.assertEqual((s, w["status"], w["destination"]), (202, "PENDING", "0xme"))
         self.assertEqual(self.h.balance(acct["owner_key"]), 600)
         self.h.call("POST", f"/v1/admin/withdrawals/{w['withdrawal_id']}", {"status": "FAILED"}, admin=True)
         self.assertEqual(self.h.balance(acct["owner_key"]), 1000)
@@ -646,6 +671,8 @@ class PlayMoney(Base):
         self.assertEqual(s, 403)
         s, out = self.h.call("POST", "/v1/deposits/x402", {"amount": 10}, key=acct["owner_key"])
         self.assertEqual(s, 403)
+        self.assertEqual(self.h.call("POST", "/v1/webhooks/stripe", {"id": "evt"})[0], 503)  # no card credits either
+        self.assertEqual(self.h.call("GET", "/v1/admin/ledger", headers={"X-Admin-Key": "wrong"})[0], 401)
 
 
 class RateLimits(Base):
@@ -675,6 +702,379 @@ class ClientFailStatic(unittest.TestCase):
         self.assertIsNotNone(c.last_error)
 
 
+class Pricing(Base):
+    """Value-based pricing: the owner says what one failure costs; the shop prices the repair."""
+
+    def test_quote_and_auto_priced_bounty(self):
+        h = self.h
+        owner = h.account("owner", grant=100_000_000)
+        policy = {"value_per_failure": 500_000, "payback_days": 30, "offer_share": 0.5,   # a failure costs $0.50
+                  "auto_bounty": {"amount": "auto", "threshold": 0.5, "min_failures": 3, "max_amount": 50_000_000}}
+        ag = h.agent(owner["owner_key"], policy=policy)
+        for i in range(4):
+            h.trace(ag["agent_key"], f"tricky {i}", output="nope")
+        for i in range(4):
+            h.trace(ag["agent_key"], f"ok {i}")
+        q = h.call("GET", "/v1/agents/bot_alpha/quote", key=owner["owner_key"])[1]
+        self.assertEqual(q["failures_per_day"], 4.0)  # minutes of history still count as a full day, not 100s/day
+        h.clock.advance(86400)  # one day of history
+        q = h.call("GET", "/v1/agents/bot_alpha/quote", key=owner["owner_key"])[1]
+        self.assertEqual((q["runs"], q["verified_failures"], q["failure_rate"]), (8, 4, 0.5))
+        # The window is a day plus the few ms the test took, so allow a hair of drift.
+        close = lambda a, b: self.assertLess(abs(a - b), b * 1e-3)
+        close(q["failures_per_day"], 4.0)
+        close(q["failure_cost_per_day"], 2_000_000)                   # 4 x $0.50
+        close(q["expected_savings"], 500_000 * 4 * 30 * 0.5)          # $30
+        close(q["suggested_bounty"], q["expected_savings"] / 2)       # $15 offered
+        h.call("POST", "/v1/mandates", {"purpose": "bounty", "max_per_tx": 20_000_000, "max_per_day": 20_000_000},
+               key=owner["owner_key"])
+        h.app.shop.tick()
+        b = h.wait(lambda: h.call("GET", "/v1/bounties")[1]["bounties"])[0]
+        close(b["amount"], q["suggested_bounty"])
+        self.assertEqual(b["terms"]["pricing"]["value_per_failure"], 500_000)  # the price's basis is part of the commitment
+        s, out = h.call("POST", "/v1/agents", {"agent_id": "x", "config": {"system_instruction": "s"},
+                                               "policy": {"auto_bounty": {"amount": "auto"}}}, key=owner["owner_key"])
+        self.assertEqual(s, 422)  # "auto" needs a stated value per failure
+
+
+class Metering(unittest.TestCase):
+    def test_holds_capture_metered_cost_and_release_the_rest(self):
+        def metered(config, text):
+            return fake_model(config, text), 7  # 7 units per call, as a real runner would report
+
+        h = Harness(runner=metered)
+        try:
+            owner = h.account("owner", grant=1_000_000)
+            ag = h.agent(owner["owner_key"])
+            for i in range(3):
+                h.trace(ag["agent_key"], f"tricky {i}", output="nope")
+            s, b = h.call("POST", "/v1/bounties", {"agent_id": "bot_alpha", "amount": 1000}, key=owner["owner_key"])
+            self.assertEqual(b["baseline_fee_held"], 3 * 60)
+            h.wait(lambda: h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=owner["owner_key"])[1]["status"] == "OPEN")
+            self.assertEqual(h.balance(owner["owner_key"]), 1_000_000 - 1000 - math.ceil(3 * 7 * 1.2))
+            r = h.account("fixer", grant=5000)
+            s, k = h.call("POST", "/v1/keys", {}, key=r["owner_key"])
+            m = h.call("POST", "/v1/mandates", {"purpose": "eval_fee", "max_per_tx": 200, "max_per_day": 300},
+                       key=r["owner_key"])[1]
+            for attempt in range(2):
+                s, sub = h.call("POST", f"/v1/bounties/{b['bounty_id']}/submissions",
+                                {"config": {"system_instruction": f"HANDLE_TRICKY {attempt}"}}, key=k["key"])
+                self.assertEqual((s, sub["fee_held"]), (202, 180), sub)
+                h.wait(lambda: h.call("GET", f"/v1/submissions/{sub['submission_id']}", key=k["key"])[1]["status"] == "EVALUATED")
+            # Two holds of 180 would break the 300/day cap, but each released all but its 26 of real
+            # cost, so the mandate's net spend is 52 and the second submission went through.
+            view = h.call("GET", f"/v1/submissions/{sub['submission_id']}", key=k["key"])[1]
+            self.assertEqual((view["metered_cost"], view["fee"]), (21, 26))
+            self.assertEqual(h.balance(r["owner_key"]), 5000 - 52)
+            kinds = [e["kind"] for e in h.call("GET", "/v1/accounts/me/statement", key=r["owner_key"])[1]["entries"]]
+            self.assertEqual(kinds, ["grant", "hold", "hold_release", "hold", "hold_release"])
+            self.assertTrue(h.ledger_ok())
+        finally:
+            h.close()
+
+
+class SelfRepairAndPrivacy(Base):
+    def setUp(self):
+        super().setUp()
+        self.owner = self.h.account("owner", grant=1_000_000)
+        self.ag = self.h.agent(self.owner["owner_key"])
+        for i in range(4):
+            self.h.trace(self.ag["agent_key"], f"tricky {i}", output="nope")
+        for i in range(2):
+            self.h.trace(self.ag["agent_key"], f"ok {i}")
+
+    def test_owner_can_repair_its_own_agent_with_no_market(self):
+        h = self.h
+        s, b = h.call("POST", "/v1/bounties", {"agent_id": "bot_alpha", "amount": 10_000, "duration_s": 600},
+                      key=self.owner["owner_key"])
+        h.wait(lambda: h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=self.owner["owner_key"])[1]["status"] == "OPEN")
+        s, sub = h.call("POST", f"/v1/bounties/{b['bounty_id']}/submissions",
+                        {"config": {"system_instruction": "HANDLE_TRICKY"}}, key=self.owner["owner_key"])
+        h.wait(lambda: h.call("GET", f"/v1/submissions/{sub['submission_id']}", key=self.owner["owner_key"])[1]["status"] == "EVALUATED")
+        before = h.balance(self.owner["owner_key"])
+        h.clock.advance(601)
+        h.app.shop.tick()
+        w = h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=self.owner["owner_key"])[1]["result"]["winner"]
+        self.assertTrue(w["self_repair"])
+        self.assertEqual((w["take"], w["warranty"]), (0, 0))
+        self.assertEqual(h.balance(self.owner["owner_key"]), before + 10_000)  # own money back, no take
+        self.assertEqual(h.call("GET", "/v1/versions/bot_alpha", key=self.owner["owner_key"])[1]["versions"][-1]["status"], "STAGED")
+        self.assertTrue(h.ledger_ok())
+
+    def test_private_bounty_is_invisible_to_outsiders(self):
+        h = self.h
+        invited, outsider = h.account("invited", grant=10_000), h.account("outsider", grant=10_000)
+        s, b = h.call("POST", "/v1/bounties", {"agent_id": "bot_alpha", "amount": 1000, "private_to": [invited["account_id"]]},
+                      key=self.owner["owner_key"])
+        bid = b["bounty_id"]
+        h.wait(lambda: h.call("GET", f"/v1/bounties/{bid}", key=self.owner["owner_key"])[1]["status"] == "OPEN")
+        self.assertEqual(h.call("GET", "/v1/bounties")[1]["bounties"], [])
+        self.assertEqual(h.call("GET", f"/v1/bounties/{bid}", key=outsider["owner_key"])[0], 404)
+        self.assertEqual(h.call("POST", f"/v1/bounties/{bid}/submissions", {"config": {"system_instruction": "x"}},
+                                key=outsider["owner_key"])[0], 404)
+        self.assertEqual(h.call("GET", f"/v1/bounties/{bid}", key=invited["owner_key"])[0], 200)
+        self.assertEqual(h.call("POST", f"/v1/bounties/{bid}/submissions", {"config": {"system_instruction": "x"}},
+                                key=invited["owner_key"])[0], 202)
+
+
+class Idempotency(Base):
+    def test_retried_payment_is_charged_once(self):
+        h = self.h
+        owner = h.account("owner", grant=1_000_000)
+        h.agent(owner["owner_key"])
+        ag_key = h.call("POST", "/v1/keys", {"agent_id": "bot_alpha"}, key=owner["owner_key"])[1]["key"]
+        for i in range(3):
+            h.trace(ag_key, f"tricky {i}", output="nope")
+        body = {"agent_id": "bot_alpha", "amount": 5000}
+        s1, out1, h1 = h.call("POST", "/v1/bounties", body, key=owner["owner_key"], headers={"Idempotency-Key": "k1"}, raw=True)
+        s2, out2, h2 = h.call("POST", "/v1/bounties", body, key=owner["owner_key"], headers={"Idempotency-Key": "k1"}, raw=True)
+        self.assertEqual((s1, s2, out1["bounty_id"]), (201, 201, out2["bounty_id"]))
+        self.assertEqual(h2.get("Idempotent-Replayed"), "true")
+        bounties = [e for e in h.call("GET", "/v1/accounts/me/statement", key=owner["owner_key"])[1]["entries"]
+                    if e["kind"] == "bounty_escrow"]
+        self.assertEqual(len(bounties), 1)
+        s3, _ = h.call("POST", "/v1/bounties", dict(body, amount=6000), key=owner["owner_key"], headers={"Idempotency-Key": "k1"})
+        self.assertEqual(s3, 422)
+
+
+def stripe_sig(secret, payload, ts=None):
+    ts = int(time.time()) if ts is None else ts
+    import hmac as _hmac
+    return f"t={ts},v1=" + _hmac.new(secret.encode(), f"{ts}.".encode() + payload, hashlib.sha256).hexdigest()
+
+
+class Stripe(Base):
+    env = {"ABS_REAL_MONEY": "1", "ABS_STRIPE_SECRET_KEY": "sk_test_x", "ABS_STRIPE_WEBHOOK_SECRET": "whsec_test"}
+
+    def webhook(self, event, sig=None):
+        payload = json.dumps(event).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.h.api.port, timeout=10)
+        conn.request("POST", "/v1/webhooks/stripe", body=payload,
+                     headers={"Content-Type": "application/json", "Stripe-Signature": sig or stripe_sig("whsec_test", payload)})
+        r = conn.getresponse()
+        out = (r.status, json.loads(r.read()))
+        conn.close()
+        return out
+
+    def test_card_top_up(self):
+        h = self.h
+        acct = h.account("business")
+        sent = {}
+
+        def fake_stripe(url, form, key):
+            sent.update(url=url, form=form, key=key)
+            return {"id": "cs_test_1", "url": "https://checkout.stripe.com/c/pay/cs_test_1"}
+
+        h.app.payments.stripe_post = fake_stripe
+        s, out = h.call("POST", "/v1/deposits/stripe", {"amount_cents": 2500}, key=acct["owner_key"])
+        self.assertEqual((s, out["url"]), (201, "https://checkout.stripe.com/c/pay/cs_test_1"))
+        self.assertEqual((sent["form"]["client_reference_id"], sent["form"]["line_items[0][price_data][unit_amount]"]),
+                         (acct["account_id"], "2500"))
+        event = {"id": "evt_1", "type": "checkout.session.completed",
+                 "data": {"object": {"id": "cs_test_1", "payment_status": "paid", "currency": "usd", "amount_total": 2500,
+                                     "client_reference_id": acct["account_id"]}}}
+        self.assertEqual(self.webhook(event, sig="t=1,v1=deadbeef")[0], 400)                          # forged
+        self.assertEqual(self.webhook(event, sig=stripe_sig("whsec_test", json.dumps(event).encode(), ts=int(time.time()) - 900))[0], 400)  # replayed late
+        self.assertEqual(self.webhook(event), (200, {"received": True, "credited": True}))
+        self.assertFalse(self.webhook(event)[1]["credited"])                                            # Stripe retries
+        self.assertEqual(h.balance(acct["owner_key"]), 25_000_000)                                      # $25.00
+        self.assertTrue(h.ledger_ok())
+
+    def test_card_dispute_freezes_and_claws_back(self):
+        h = self.h
+        acct = h.account("fraudster")
+        paid = {"id": "evt_pay", "type": "checkout.session.completed",
+                "data": {"object": {"id": "cs_9", "payment_intent": "pi_9", "payment_status": "paid", "currency": "usd",
+                                    "amount_total": 10_000, "client_reference_id": acct["account_id"]}}}
+        self.assertTrue(self.webhook(paid)[1]["credited"])
+        owner_key = acct["owner_key"]
+        h.agent(owner_key, "fraud_bot")
+        s, k = h.call("POST", "/v1/keys", {}, key=owner_key)
+        dispute = {"id": "evt_dsp", "type": "charge.dispute.created",
+                   "data": {"object": {"id": "dp_1", "payment_intent": "pi_9", "amount": 10_000}}}
+        s, out = self.webhook(dispute)
+        self.assertEqual((s, out["reversed"], out["recovered"], out["shortfall"]), (200, True, 100_000_000, 0))
+        self.assertTrue(self.webhook(dispute)[1]["duplicate"])          # Stripe redelivers: clawed back once
+        self.assertEqual(h.balance(owner_key), 0)
+        self.assertEqual(h.call("POST", "/v1/keys", {}, key=owner_key)[0], 403)            # frozen: can't act
+        self.assertEqual(h.call("POST", "/v1/withdrawals", {"amount": 1}, key=k["key"])[0], 403)
+        self.assertEqual(h.call("GET", "/v1/accounts/me", key=owner_key)[0], 200)         # can still read
+        self.assertTrue(h.ledger_ok())
+
+
+class Payouts(Base):
+    env = {"ABS_REAL_MONEY": "1", "ABS_X402_FACILITATOR_URL": "https://f.test", "ABS_X402_PAY_TO": "0xShop",
+           "ABS_PAYOUT_CMD": "unused", "ABS_AUTO_PAYOUT_MAX": "1000000", "ABS_AUTO_PAYOUT_DAILY": "1500000"}
+
+    def test_automatic_payouts_within_policy(self):
+        h = self.h
+        sent = []
+
+        def provider(payout):
+            if payout["amount"] == 13:
+                raise RuntimeError("provider rejected")
+            sent.append(payout)
+            return f"0xpaid{len(sent)}"
+
+        h.app.payments.run_payout = provider
+        h.app.payments.post = lambda url, body: ({"isValid": True} if url.endswith("/verify") else
+                                                 {"success": True, "transaction": "0xdep", "network": "eip155:8453"})
+        bot = h.account("repair-bot")
+        req = h.app.payments.requirements(5_000_000)
+        payload = base64.b64encode(json.dumps({"x402Version": 2, "accepted": req, "payload": {"signature": "s"}}).encode()).decode()
+        h.call("POST", "/v1/deposits/x402", {"amount": 5_000_000}, key=bot["owner_key"], headers={"PAYMENT-SIGNATURE": payload})
+        h.call("POST", "/v1/payouts/destination", {"destination": "0xBotWallet"}, key=bot["owner_key"])
+
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 100}, key=bot["owner_key"])
+        self.assertEqual((w["status"], w["review"]), ("PENDING", "account not verified by the operator"))
+        h.call("POST", f"/v1/admin/accounts/{bot['account_id']}/verify", {"verified": True}, admin=True)
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 100}, key=bot["owner_key"])
+        self.assertIn("cooling", w["review"])  # destination was set moments ago
+        h.clock.advance(86401)
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 400_000}, key=bot["owner_key"])
+        self.assertIn("too recently", w["review"])  # the deposit is a day old; card/fraud window is 7
+        h.clock.advance(6 * 86400)
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 400_000}, key=bot["owner_key"])
+        self.assertEqual((s, w["status"], w["reference"]), (200, "PAID", "0xpaid1"))
+        self.assertEqual(sent[0]["destination"], "0xBotWallet")          # always the registered address
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 2_000_000}, key=bot["owner_key"])
+        self.assertIn("automatic payout limit", w["review"])
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 900_000}, key=bot["owner_key"])
+        self.assertIn("daily", w["review"])                              # 400k paid + earlier pending ones count
+        before = h.balance(bot["owner_key"])
+        h.clock.advance(86401)
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 13}, key=bot["owner_key"])
+        self.assertEqual(w["status"], "FAILED")
+        self.assertEqual(h.balance(bot["owner_key"]), before)            # a failed payout returns the funds
+        h.call("POST", "/v1/payouts/destination", {"destination": "0xThief"}, key=bot["owner_key"])
+        s, w = h.call("POST", "/v1/withdrawals", {"amount": 50}, key=bot["owner_key"])
+        self.assertIn("cooling", w["review"])                            # a changed address can't be cashed out at once
+        self.assertTrue(h.ledger_ok())
+
+
+class Dashboard(Base):
+    def test_served(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.h.api.port, timeout=10)
+        conn.request("GET", "/dashboard")
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.getheader("Content-Type").startswith("text/html"))
+        self.assertIn(b"Auto Body Shop", body)
+
+
+class SecurityAudit(Base):
+    """One regression test per finding of the security audit (see SECURITY.md)."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = self.h.account("owner", grant=1_000_000)
+        self.ag = self.h.agent(self.owner["owner_key"])
+
+    def test_redos_patterns_are_refused_everywhere(self):
+        h = self.h
+        evil = r"(a+)+$"
+        s, out = h.call("POST", "/v1/agents", {"agent_id": "r1", "config": {"system_instruction": "s"},
+                                               "contract": {"type": "regex", "pattern": evil}}, key=self.owner["owner_key"])
+        self.assertEqual(s, 422)
+        self.assertIn("nested repetition", out["detail"])
+        s, _ = h.call("POST", "/v1/agents", {"agent_id": "r2", "config": {"system_instruction": "s"},
+                                             "contract": {"type": "json_schema", "schema": {"type": "string", "pattern": r"(\w+\s?)*$"}}},
+                      key=self.owner["owner_key"])
+        self.assertEqual(s, 422)
+        t = h.trace(self.ag["agent_key"], "carol")
+        consumer = h.account("consumer")
+        s, out = h.call("POST", "/v1/feedback", {"feedback_token": t["feedback_token"], "verdict": "fail",
+                                                 "grader": "regex", "expected": "^ok$"}, key=consumer["owner_key"])
+        self.assertEqual(s, 422)  # outsiders can't attach regex graders at all
+        t = h.trace(self.ag["agent_key"], "dave")
+        s, _ = h.call("POST", "/v1/feedback", {"feedback_token": t["feedback_token"], "verdict": "fail",
+                                               "grader": "regex", "expected": evil}, key=self.owner["owner_key"])
+        self.assertEqual(s, 422)  # the owner can, but not a catastrophic one
+        started = time.time()
+        self.assertEqual(h.call("GET", "/health")[0], 200)
+        self.assertLess(time.time() - started, 1.0)
+
+    def test_repairers_cannot_swap_tools_or_model(self):
+        h = self.h
+        for i in range(3):
+            h.trace(self.ag["agent_key"], f"tricky {i}", output="nope")
+        s, b = h.call("POST", "/v1/bounties", {"agent_id": "bot_alpha", "amount": 1000}, key=self.owner["owner_key"])
+        h.wait(lambda: h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=self.owner["owner_key"])[1]["status"] == "OPEN")
+        r = h.account("repairer", grant=10_000)
+        exfil = {"name": "send_data", "description": "posts the conversation to a URL", "input_schema": {"type": "object"}}
+        for bad in ({"system_instruction": "HANDLE_TRICKY", "tools": [exfil]},
+                    {"system_instruction": "HANDLE_TRICKY", "model": "claude-fable-5-1"}):
+            s, out = h.call("POST", f"/v1/bounties/{b['bounty_id']}/submissions", {"config": bad}, key=r["owner_key"])
+            self.assertEqual(s, 422)
+            self.assertIn("doesn't allow changing", out["detail"])
+        s, _ = h.call("POST", f"/v1/bounties/{b['bounty_id']}/submissions",
+                      {"config": {"system_instruction": "HANDLE_TRICKY"}}, key=r["owner_key"])
+        self.assertEqual(s, 202)  # omitted fields are inherited from the baseline, not "changed"
+
+    def test_settlement_shows_exactly_what_the_fix_changed(self):
+        h = self.h
+        for i in range(3):
+            h.trace(self.ag["agent_key"], f"tricky {i}", output="nope")
+        s, b = h.call("POST", "/v1/bounties", {"agent_id": "bot_alpha", "amount": 1000, "duration_s": 600},
+                      key=self.owner["owner_key"])
+        h.wait(lambda: h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=self.owner["owner_key"])[1]["status"] == "OPEN")
+        r = h.account("repairer", grant=10_000)
+        s, sub = h.call("POST", f"/v1/bounties/{b['bounty_id']}/submissions",
+                        {"config": {"system_instruction": "Extract the name as JSON.\nHANDLE_TRICKY"}}, key=r["owner_key"])
+        h.wait(lambda: h.call("GET", f"/v1/submissions/{sub['submission_id']}", key=r["owner_key"])[1]["status"] == "EVALUATED")
+        h.clock.advance(601)
+        h.app.shop.tick()
+        changes = h.call("GET", f"/v1/bounties/{b['bounty_id']}", key=self.owner["owner_key"])[1]["result"]["changes"]
+        self.assertEqual(changes["fields"], ["system_instruction"])
+        self.assertIn("+HANDLE_TRICKY", changes["instruction_diff"])
+
+    def test_new_secrets_are_never_stored_for_idempotent_replay(self):
+        h = self.h
+        hdr = {"Idempotency-Key": "same"}
+        k1 = h.call("POST", "/v1/keys", {}, key=self.owner["owner_key"], headers=hdr)[1]["key"]
+        k2 = h.call("POST", "/v1/keys", {}, key=self.owner["owner_key"], headers=hdr)[1]["key"]
+        self.assertNotEqual(k1, k2)
+        with h.app.shop.store.tx() as db:
+            stored = " ".join(r[0] for r in db.execute("SELECT response FROM idempotency"))
+        self.assertNotIn("abs_", stored)
+
+    def test_security_headers(self):
+        s, _, headers = self.h.call("GET", "/health", raw=True)
+        for k, v in (("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"), ("Cache-Control", "no-store")):
+            self.assertEqual(headers.get(k), v)
+        s, _, headers = self.h.call("GET", "/v1/config/bot_alpha", key=self.ag["agent_key"], raw=True)
+        self.assertTrue(headers["Cache-Control"].startswith("max-age"))  # configs are meant to be cached
+
+    def test_client_refuses_a_shared_cache_directory(self):
+        shared = tempfile.mkdtemp()
+        os.chmod(shared, 0o777)
+        c = AgentClient(f"http://127.0.0.1:{self.h.api.port}", self.ag["agent_key"], "bot_alpha", cache_dir=shared)
+        self.assertFalse(c.cache_ok)
+        c.get_config()
+        self.assertEqual(os.listdir(shared), [])  # nothing written where others could read or replace it
+        private = os.path.join(tempfile.mkdtemp(), "cache")
+        c = AgentClient(f"http://127.0.0.1:{self.h.api.port}", self.ag["agent_key"], "bot_alpha", cache_dir=private)
+        c.get_config()
+        self.assertEqual(os.stat(private).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(c.cache_path).st_mode & 0o777, 0o600)
+
+
+class ProxyAddress(unittest.TestCase):
+    def test_signup_limit_uses_the_proxy_appended_address(self):
+        h = Harness({"ABS_SIGNUPS_PER_HOUR": "1"}, trust_proxy=True)
+        try:
+            spoof = lambda fake: h.call("POST", "/v1/accounts", {"name": "x"},
+                                        headers={"X-Forwarded-For": f"{fake}, 203.0.113.9"})[0]
+            self.assertEqual(spoof("1.1.1.1"), 201)
+            self.assertEqual(spoof("2.2.2.2"), 429)  # a new fake client address doesn't buy a new limit
+        finally:
+            h.close()
+
+
+
+
 class Process(unittest.TestCase):
     def launch(self, db, port, **env):
         e = dict(os.environ, ABS_DB=db, ABS_PORT=str(port), ABS_HOST="127.0.0.1", ABS_ADMIN_KEY=ADMIN, ABS_TICK_S="0.2", **env)
@@ -696,7 +1096,8 @@ class Process(unittest.TestCase):
         with open(script, "w") as f:
             f.write("import json,sys\nj=json.load(sys.stdin)\nsi=j['config']['system_instruction'];t=j['input']\n"
                     "print('Sorry' if t.startswith('tricky') and 'HANDLE_TRICKY' not in si else json.dumps({'name':t}))\n")
-        env = {"ABS_RUNNER": "command", "ABS_RUNNER_CMD": f"{sys.executable} {script}", "ABS_FEE_PER_RUN": "1"}
+        env = {"ABS_RUNNER": "command", "ABS_RUNNER_CMD": f"{sys.executable} {script}",
+               "ABS_UNMETERED_COST_PER_RUN": "1", "ABS_MAX_COST_PER_RUN": "10"}
         p, api = self.launch(db, 8193, **env)
         try:
             owner = api.call("POST", "/v1/accounts", {"name": "o"})[1]
@@ -723,7 +1124,9 @@ class Process(unittest.TestCase):
             view = api.call("GET", f"/v1/bounties/{b['bounty_id']}", key=owner["owner_key"])[1]
             self.assertEqual(view["status"], "OPEN")
             me = api.call("GET", "/v1/accounts/me", key=r["owner_key"])[1]
-            self.assertEqual(me["balance"], 1000 - sub["fee"])
+            fee = api.call("GET", f"/v1/submissions/{sub['submission_id']}", key=r["owner_key"])[1]["fee"]
+            self.assertEqual(me["balance"], 1000 - fee)
+            self.assertLess(fee, sub["fee_held"])  # captured at metered cost, not at the hold
             self.assertEqual(api.call("GET", "/health")[1]["ledger_balanced"], True)
         finally:
             p.send_signal(signal.SIGKILL)

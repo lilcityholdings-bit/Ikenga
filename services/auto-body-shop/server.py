@@ -7,6 +7,7 @@ for the contract, and README.md for why it's built this way.
 Stdlib only (http.server + sqlite3). The optional exception is ABS_RUNNER=claude, which uses the
 `anthropic` SDK.
 """
+import hmac
 import json
 import math
 import os
@@ -19,11 +20,17 @@ from urllib.parse import parse_qs, urlsplit
 
 import ledger
 import runners
-from db import ApiError, Clock, Store
+from db import ApiError, Clock, Store, sha256
 from payments import Payments
 from shop import Shop
 
 MAX_BODY = 1 << 20
+# Responses that carry a freshly minted secret. They are never stored for idempotent replay:
+# keys are otherwise only ever kept as hashes, and a replay cache must not undo that.
+NO_REPLAY_PATHS = {"/v1/keys", "/v1/agents", "/v1/accounts"}
+IDEMPOTENCY_TTL = 86400
+SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+                    "Cache-Control": "no-store"}
 
 
 class RateLimiter:
@@ -44,7 +51,10 @@ class RateLimiter:
                 return math.ceil((cost - tokens) * 60.0 / per_minute)
             self.buckets[key] = (tokens - cost, now)
             if len(self.buckets) > 100_000:
-                self.buckets.clear()  # crude memory bound; limits restart from full
+                # Bound memory by dropping idle buckets (idle means refilled anyway). Clearing
+                # everything would let a flood of fresh keys reset every client's limit.
+                cutoff = now - 600
+                self.buckets = {k: v for k, v in self.buckets.items() if v[1] > cutoff}
             return 0
 
 
@@ -74,11 +84,14 @@ class App:
         self.shop, self.payments, self.admin_key, self.s = shop, payments, admin_key, settings
         self.limiter = RateLimiter()
         self.ctx = threading.local()  # per-request headers and client IP (handlers run on many threads)
+        self.inflight, self.inflight_lock = set(), threading.Lock()
         self.routes = [
             ("GET", r"/", self.index, None),
             ("GET", r"/health", self.health, None),
             ("POST", r"/v1/accounts", self.signup, None),
+            ("GET", r"/dashboard", self.dashboard, None),
             ("GET", r"/v1/accounts/me", lambda p, b, q: self.shop.me(p), "any"),
+            ("GET", r"/v1/accounts/me/statement", self.statement, "any"),
             ("GET", r"/v1/accounts/(?P<account_id>[^/]+)/reputation", lambda p, b, q, account_id: self.shop.reputation(account_id), None),
             ("POST", r"/v1/keys", lambda p, b, q: self.shop.new_bot_key(p, b), "owner"),
             ("POST", r"/v1/keys/(?P<key_id>[^/]+)/revoke", self.revoke_key, "owner"),
@@ -87,6 +100,7 @@ class App:
             ("POST", r"/v1/agents", lambda p, b, q: (201, self.shop.create_agent(p, b)), "owner"),
             ("POST", r"/v1/agents/(?P<agent_id>[^/]+)", lambda p, b, q, agent_id: self.shop.update_agent(p, agent_id, b), "owner"),
             ("GET", r"/v1/agents/(?P<agent_id>[^/]+)/events", self.events, "any"),
+            ("GET", r"/v1/agents/(?P<agent_id>[^/]+)/quote", lambda p, b, q, agent_id: self.shop.quote(p, agent_id), "any"),
             ("GET", r"/v1/config/(?P<agent_id>[^/]+)", self.get_config, "any"),
             ("POST", r"/v1/telemetry", self.telemetry, "any"),
             ("POST", r"/v1/feedback", lambda p, b, q: self.shop.feedback(p, b), "any"),
@@ -101,7 +115,12 @@ class App:
             ("POST", r"/v1/bounties/(?P<bid>\d+)/submissions", lambda p, b, q, bid: (202, self.shop.submit(p, int(bid), b)), "any"),
             ("GET", r"/v1/submissions/(?P<sid>\d+)", lambda p, b, q, sid: self.shop.submission_view(p, int(sid)), "any"),
             ("POST", r"/v1/deposits/x402", self.deposit, "any"),
-            ("POST", r"/v1/withdrawals", lambda p, b, q: (202, self.payments.withdraw(p, positive_amount(b), b.get("destination"))), "any"),
+            ("POST", r"/v1/deposits/stripe", self.stripe_checkout, "any"),
+            ("POST", r"/v1/webhooks/stripe", self.stripe_webhook, None),
+            ("POST", r"/v1/payouts/destination", lambda p, b, q: self.payments.set_destination(p, b.get("destination")), "owner"),
+            ("POST", r"/v1/withdrawals", self.withdraw, "any"),
+            ("POST", r"/v1/admin/accounts/(?P<account_id>[^/]+)/verify",
+             lambda p, b, q, account_id: self.payments.verify_account(account_id, b.get("verified", True)), "admin"),
             ("POST", r"/v1/admin/grants", self.admin_grant, "admin"),
             ("POST", r"/v1/admin/withdrawals/(?P<wid>\d+)", self.admin_withdrawal, "admin"),
             ("GET", r"/v1/admin/ledger", self.admin_ledger, "admin"),
@@ -109,7 +128,8 @@ class App:
 
     # ---- plumbing -------------------------------------------------------------------------
 
-    def handle(self, method, raw_path, headers, body, client_ip):
+    def handle(self, method, raw_path, headers, body, client_ip, raw=b""):
+        self.ctx.raw = raw
         url = urlsplit(raw_path)
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         for m, pattern, fn, auth in self.routes:
@@ -118,13 +138,59 @@ class App:
                 continue
             self.ctx.headers, self.ctx.ip = headers, client_ip
             principal = self.authenticate(headers, auth, client_ip)
+            idem = headers.get("Idempotency-Key")
+            if method == "POST" and principal is not None and principal.get("frozen"):
+                raise ApiError(403, "Account frozen after a payment dispute; contact the operator")
+            if method == "POST" and idem and principal is not None and url.path not in NO_REPLAY_PATHS:
+                return self.idempotent(principal, idem, method, url.path, raw,
+                                       lambda: fn(principal, body, query, **match.groupdict()))
             out = fn(principal, body, query, **match.groupdict())
             return out if isinstance(out, tuple) else (200, out)
         raise ApiError(404, "Not Found")
 
+    def idempotent(self, principal, idem, method, path, raw, run):
+        """A bot that times out and retries must not pay twice. The first response to each
+        (key, Idempotency-Key) pair is stored and replayed, including errors below 500 (a
+        refusal stays a refusal). Reusing the key for a different request is an error, and so
+        is a retry while the first attempt is still running."""
+        if len(idem) > 200:
+            raise ApiError(422, "Idempotency-Key too long")
+        fp = sha256(method.encode() + b" " + path.encode() + b" " + raw)
+        slot = (principal["key_id"], idem)
+        store = self.shop.store
+        with store.tx() as db:
+            row = db.execute("SELECT * FROM idempotency WHERE key_id=? AND idem_key=?", slot).fetchone()
+        if row is not None:
+            if row["request"] != fp:
+                raise ApiError(422, "Idempotency-Key was already used for a different request")
+            stored = json.loads(row["response"])
+            return row["status"], stored["body"], dict(stored["headers"], **{"Idempotent-Replayed": "true"})
+        with self.inflight_lock:
+            if slot in self.inflight:
+                raise ApiError(409, "A request with this Idempotency-Key is still in progress")
+            self.inflight.add(slot)
+        try:
+            try:
+                out = run()
+                out = out if isinstance(out, tuple) else (200, out)
+                status, payload, extra = out[0], out[1], (out[2] if len(out) > 2 else {})
+            except ApiError as e:
+                status, payload, extra = e.status, e.body or {"detail": e.detail}, e.headers
+            if status < 500:
+                with store.tx() as db:
+                    db.execute("DELETE FROM idempotency WHERE created_at<?", (store.now() - IDEMPOTENCY_TTL,))
+                    db.execute("INSERT INTO idempotency (key_id, idem_key, request, status, response, created_at)"
+                               " VALUES (?,?,?,?,?,?)", (*slot, fp, status, json.dumps({"body": payload, "headers": extra}),
+                                                         store.now()))
+            return status, payload, extra
+        finally:
+            with self.inflight_lock:
+                self.inflight.discard(slot)
+
     def authenticate(self, headers, auth, client_ip):
         if auth == "admin":
-            if self.admin_key is None or headers.get("X-Admin-Key") != self.admin_key:
+            given = headers.get("X-Admin-Key") or ""
+            if self.admin_key is None or not hmac.compare_digest(given.encode(), self.admin_key.encode()):
                 raise ApiError(401, "Missing or invalid X-Admin-Key")
             return None
         header = headers.get("Authorization") or ""
@@ -147,7 +213,12 @@ class App:
                 "what": "A repair market for AI agents: verified failures become bounties, repair bots compete on "
                         "hidden tests, and payment and the fix are both escrowed until the fix is proven.",
                 "real_money": self.payments.real_money, "x402": self.payments.x402_ready(),
-                "referee": self.s["runner_name"], "fee_per_run": self.s["fee_per_run"], "take_bps": self.s["take_bps"]}
+                "referee": self.s["runner_name"], "take_bps": self.s["take_bps"], "compute_margin_bps": self.s["margin_bps"],
+                "max_cost_per_run": self.s["max_cost_per_run"],
+                "rails": {"x402": self.payments.x402_ready(),
+                          "stripe": bool(self.payments.real_money and self.payments.stripe_key),
+                          "auto_payouts": bool(self.payments.real_money and self.payments.payout_cmd)},
+                "dashboard": "/dashboard"}
 
     def health(self, p, b, q):
         with self.shop.store.tx() as db:
@@ -216,6 +287,27 @@ class App:
         out, headers = self.payments.x402_deposit(p, positive_amount(b), self.ctx.headers.get("PAYMENT-SIGNATURE"))
         return 200, out, headers
 
+    def statement(self, p, b, q):
+        with self.shop.store.tx() as db:
+            return {"account_id": p["account_id"], "balance": ledger.balance(db, ledger.acct(p["account_id"])),
+                    "entries": ledger.statement(db, p["account_id"], int(q.get("after", 0)))}
+
+    def stripe_checkout(self, p, b, q):
+        return 201, self.payments.stripe_checkout(p, field(b, "amount_cents", "int"))
+
+    def stripe_webhook(self, p, b, q):
+        return self.payments.stripe_webhook(self.ctx.raw, self.ctx.headers.get("Stripe-Signature"))
+
+    def withdraw(self, p, b, q):
+        out = self.payments.withdraw(p, positive_amount(b))
+        return (200 if out["status"] == "PAID" else 202), out
+
+    def dashboard(self, p, b, q):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"), "rb") as f:
+            return 200, None, {"Content-Type": "text/html; charset=utf-8", "_raw": f.read(),
+                               "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                           "script-src 'self' 'unsafe-inline'; frame-ancestors 'none'"}
+
     def admin_grant(self, p, b, q):
         return self.payments.grant(field(b, "account_id", "str"), positive_amount(b))
 
@@ -235,6 +327,7 @@ def make_handler(app, trust_proxy=False):
 
         def _dispatch(self, method):
             extra = {}
+            raw = b""
             try:
                 body = {}
                 if method == "POST":
@@ -250,8 +343,10 @@ def make_handler(app, trust_proxy=False):
                         raise ApiError(422, "Body must be a JSON object")
                 ip = self.client_address[0]
                 if trust_proxy and self.headers.get("X-Forwarded-For"):
-                    ip = self.headers["X-Forwarded-For"].split(",")[0].strip()
-                out = app.handle(method, self.path, self.headers, body, ip)
+                    # The rightmost entry is the one the trusted proxy appended; anything to its left
+                    # was sent by the client and can say anything.
+                    ip = self.headers["X-Forwarded-For"].split(",")[-1].strip()
+                out = app.handle(method, self.path, self.headers, body, ip, raw if method == "POST" else b"")
                 status, payload = out[0], out[1]
                 if len(out) > 2:
                     extra = out[2]
@@ -260,11 +355,14 @@ def make_handler(app, trust_proxy=False):
             except Exception as e:
                 print(f"[error] {method} {self.path}: {e!r}", file=sys.stderr, flush=True)
                 status, payload = 500, {"detail": "Internal Server Error"}
-            data = b"" if payload is None else json.dumps(payload).encode()
+            extra = dict(extra)
+            data = extra.pop("_raw", None)
+            if data is None:
+                data = b"" if payload is None else json.dumps(payload).encode()
             self.send_response(status)
-            if payload is not None:
+            if payload is not None and "Content-Type" not in extra:
                 self.send_header("Content-Type", "application/json")
-            for k, v in extra.items():
+            for k, v in dict(SECURITY_HEADERS, **extra).items():
                 self.send_header(k, v)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -285,7 +383,11 @@ def make_handler(app, trust_proxy=False):
 
 def settings_from_env(env):
     return {
-        "fee_per_run": int(env.get("ABS_FEE_PER_RUN", "2000")),        # atomic units per case run (2000 = $0.002 in USDC)
+        # Referee costs are metered: each model call's real cost, plus margin. max_cost_per_run caps what
+        # one call can be charged and sizes the hold; runners that can't meter are charged a flat rate.
+        "max_cost_per_run": int(env.get("ABS_MAX_COST_PER_RUN", "20000")),          # $0.02
+        "unmetered_cost_per_run": int(env.get("ABS_UNMETERED_COST_PER_RUN", "2000")),  # $0.002
+        "margin_bps": int(env.get("ABS_COMPUTE_MARGIN_BPS", "2000")),                # 20% on compute
         "take_bps": int(env.get("ABS_TAKE_BPS", "1000")),              # platform share of each award
         "trials": int(env.get("ABS_EVAL_TRIALS", "1")),
         "visible_fraction": float(env.get("ABS_VISIBLE_FRACTION", "0.5")),
