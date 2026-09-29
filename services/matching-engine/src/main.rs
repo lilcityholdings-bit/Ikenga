@@ -4,6 +4,8 @@ mod auth;
 mod bench;
 mod autopilot;
 mod challenge;
+mod clear_api;
+mod clearing;
 mod credits;
 mod events;
 mod crypto;
@@ -245,6 +247,7 @@ fn main() {
     install_shutdown_handler(Arc::clone(&state));
     install_settlement_sweeper(Arc::clone(&state));
     install_agenttrust_referee(Arc::clone(&state));
+    install_clearing_cycle(Arc::clone(&state));
 
     // One thread per *connection*, with keep-alive, and a hard cap on how many at once.
     //
@@ -291,6 +294,27 @@ fn main() {
             Err(e) => eprintln!("accept error: {e}"),
         }
     }
+}
+
+/// Closes the clearinghouse's open cycle on a fixed period (`IKENGA_CLEAR_CYCLE_SECS`, default
+/// hourly; 0 turns it off and leaves closing to `POST /v1/clear/cycles`).
+fn install_clearing_cycle(state: Arc<AppState>) {
+    let secs = state.clearing.config.cycle_secs;
+    if secs == 0 {
+        println!("clearing: automatic cycle close OFF (close with POST /v1/clear/cycles)");
+        return;
+    }
+    println!(
+        "clearing: netting bot-to-bot obligations every {secs}s, fee = {}% of savings vs {}",
+        state.clearing.config.share_bps as f64 / 100.0,
+        state.clearing.config.rail_label
+    );
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(secs));
+        if let Some(c) = state.clearing.close_cycle(&state.wal, api::now_ms_pub()) {
+            println!("clearing: closed cycle {} ({} participant lines)", c.cycle_id, c.lines.len());
+        }
+    });
 }
 
 /// Hard ceiling on concurrent connections; past this, new ones are refused rather than queued.
@@ -508,6 +532,14 @@ fn route(state: &Arc<AppState>, req: &http::Request) -> http::Response {
         ("GET", ["v1", "challenges"]) => api::list_challenges(&state, &req),
         ("POST", ["v1", "challenges", id, "accept"]) => api::accept_challenge(&state, &req, id),
         ("POST", ["v1", "challenges", id, "withdraw"]) => api::withdraw_challenge(&state, &req, id),
+        ("GET", ["v1", "clear"]) => clear_api::overview(&state),
+        ("POST", ["v1", "clear", "obligations"]) => clear_api::record_obligation(&state, &req),
+        ("GET", ["v1", "clear", "position"]) => clear_api::position(&state, &req),
+        ("GET", ["v1", "clear", "capacity", agent_id]) => clear_api::capacity(&state, &req, agent_id),
+        ("POST", ["v1", "clear", "cycles"]) => clear_api::close_cycle(&state, &req),
+        ("GET", ["v1", "clear", "cycles", id]) => clear_api::get_cycle(&state, &req, id),
+        ("POST", ["v1", "clear", "instructions", id, "paid"]) => clear_api::mark_paid(&state, &req, id),
+        ("POST", ["v1", "clear", "instructions", id, "confirm"]) => clear_api::confirm(&state, &req, id),
         ("GET", ["v1", "spec"]) => api::get_spec(&state, &req),
         // Where a machine looks first, by convention. Same document.
         ("GET", [".well-known", "ikenga.json"]) => api::get_spec(&state, &req),

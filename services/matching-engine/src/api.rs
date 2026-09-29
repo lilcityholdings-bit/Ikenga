@@ -20,7 +20,7 @@ fn bal_adjust(balances: &mut Balances, agent_id: &str, asset: &str, delta: f64) 
     *balances.entry((agent_id.to_string(), asset.to_string())).or_insert(0.0) += delta;
 }
 
-fn err_response(status: u16, err: ApiError) -> Response {
+pub(crate) fn err_response(status: u16, err: ApiError) -> Response {
     Response::json(status, &err.to_json())
 }
 
@@ -31,7 +31,7 @@ fn now_ms() -> i64 {
 
 /// Verifies signing headers + replay/timestamp checks, then enforces the trust-tiered rate
 /// limit. Shared by every authenticated endpoint.
-fn authenticate(state: &AppState, req: &Request, method: &str, path: &str) -> Result<String, Response> {
+pub(crate) fn authenticate(state: &AppState, req: &Request, method: &str, path: &str) -> Result<String, Response> {
     let agent_id = req
         .header("x-agent-id")
         .ok_or_else(|| err_response(401, ApiError::new("MISSING_HEADER", "missing X-Agent-ID")))?;
@@ -128,7 +128,7 @@ fn authenticate(state: &AppState, req: &Request, method: &str, path: &str) -> Re
 /// checked in constant time against the key `AppState` generated (or was given via
 /// `IKENGA_OWNER_KEY`) at startup. This is a single shared secret, not the spec's real
 /// role-based owner/admin credential system — adequate for one operator, not for a team.
-fn authenticate_owner(state: &AppState, req: &Request) -> Result<(), Response> {
+pub(crate) fn authenticate_owner(state: &AppState, req: &Request) -> Result<(), Response> {
     match req.header("x-owner-key") {
         Some(key) if state.check_owner_key(key) => Ok(()),
         _ => Err(err_response(403, ApiError::new("FORBIDDEN", "missing or invalid X-Owner-Key"))),
@@ -3828,6 +3828,7 @@ pub fn index(state: &AppState) -> Response {
                     ep("GET", "/v1/privacy", "none", "What the anonymity model does and does not hide"),
                     ep("POST", "/v1/agents", "self-signed", "Register your own public key and get an agent id"),
                     ep("GET", "/v1/route", "optional", "Non-custodial swap route; unsigned callers get a limited trial"),
+                    ep("GET", "/v1/clear", "none", "Ikenga Clear: record what you owe other bots instead of paying each one; netted every cycle into the fewest transfers, fee = a share of what you saved"),
                     ep("GET", "/v1/markets", "none", "Open prediction markets with pooled odds"),
                     ep("GET", "/v1/markets/{id}", "none", "One market, with its resolution rule"),
                     ep("GET", "/v1/tools", "none",

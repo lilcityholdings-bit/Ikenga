@@ -183,6 +183,24 @@ pub enum Record {
     /// same batch; this record only fixes the outcome so the market can't be re-staked or
     /// re-settled on replay.
     MarketSettled { market_id: String, winning_outcome: Option<u32>, voided: bool },
+    /// A promise to pay recorded with the clearinghouse (`clearing.rs`). No balance moves: the
+    /// clearinghouse is non-custodial, so this is the whole fact.
+    ClearObligation {
+        obligation_id: String,
+        payer: String,
+        payee: String,
+        asset: String,
+        amount_micros: i64,
+        memo: String,
+        reference: Option<String>,
+        created_at_ms: i64,
+    },
+    /// A clearing cycle closed. Every obligation logged since the previous close belongs to it —
+    /// both are appended under the clearinghouse's lock, so log order is cycle membership. The
+    /// snapshot carries the computed result, so replay never re-runs the netting.
+    ClearCycle { snapshot: Json },
+    /// A settlement instruction was marked paid or confirmed settled.
+    ClearStatus { instruction_id: String, status: String, tx_ref: Option<String>, at_ms: i64 },
 }
 
 impl Record {
@@ -337,6 +355,30 @@ impl Record {
                 ("win", winning_outcome.map(|w| Json::num(w as f64)).unwrap_or(Json::Null)),
                 ("void", Json::Bool(*voided)),
             ]),
+            Record::ClearObligation {
+                obligation_id, payer, payee, asset, amount_micros, memo, reference, created_at_ms,
+            } => Json::obj(vec![
+                ("t", Json::str("clob")),
+                ("oid", Json::str(obligation_id.clone())),
+                ("p", Json::str(payer.clone())),
+                ("q", Json::str(payee.clone())),
+                ("asset", Json::str(asset.clone())),
+                ("um", Json::num(*amount_micros as f64)),
+                ("memo", Json::str(memo.clone())),
+                ("ref", reference.clone().map(Json::str).unwrap_or(Json::Null)),
+                ("ts", Json::num(*created_at_ms as f64)),
+            ]),
+            Record::ClearCycle { snapshot } => Json::obj(vec![
+                ("t", Json::str("clcyc")),
+                ("snap", snapshot.clone()),
+            ]),
+            Record::ClearStatus { instruction_id, status, tx_ref, at_ms } => Json::obj(vec![
+                ("t", Json::str("clst")),
+                ("iid", Json::str(instruction_id.clone())),
+                ("st", Json::str(status.clone())),
+                ("tx", tx_ref.clone().map(Json::str).unwrap_or(Json::Null)),
+                ("at", Json::num(*at_ms as f64)),
+            ]),
         };
         json.to_string()
     }
@@ -459,6 +501,23 @@ impl Record {
                 market_id: s("mid")?,
                 winning_outcome: j.get("win").and_then(Json::as_f64).map(|w| w as u32),
                 voided: matches!(j.get("void"), Some(Json::Bool(true))),
+            },
+            "clob" => Record::ClearObligation {
+                obligation_id: s("oid")?,
+                payer: s("p")?,
+                payee: s("q")?,
+                asset: s("asset")?,
+                amount_micros: f("um")? as i64,
+                memo: s("memo")?,
+                reference: j.get("ref").and_then(Json::as_str).map(|v| v.to_string()),
+                created_at_ms: f("ts")? as i64,
+            },
+            "clcyc" => Record::ClearCycle { snapshot: j.get("snap")?.clone() },
+            "clst" => Record::ClearStatus {
+                instruction_id: s("iid")?,
+                status: s("st")?,
+                tx_ref: j.get("tx").and_then(Json::as_str).map(|v| v.to_string()),
+                at_ms: f("at")? as i64,
             },
             _ => return None,
         })

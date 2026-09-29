@@ -91,6 +91,15 @@ Implemented and running today:
   rather than folded into the rate. This is the mode that doesn't need liquidity to already
   exist — **read `docs/CUSTODY.md`**, which lays out how it differs from the order book and what
   it does and doesn't collect today.
+- **Ikenga Clear: a clearinghouse for bot-to-bot payments** (`src/clearing.rs`,
+  `src/clear_api.rs`). Bots record what they owe each other (`POST /v1/clear/obligations`)
+  instead of paying every call. Each cycle nets everything into the fewest transfers that settle
+  it (never more than participants − 1), which bots then make directly from their own wallets.
+  Nothing is held here. The fee is the lesser of 20% of what netting saved that bot or 1% of what
+  it sent, and zero if it saved nothing. Every bot gets a per-cycle savings receipt. Net debit is
+  capped by trust band (gross isn't), late payers are frozen network-wide, and a public credit
+  check lets a seller vet a buyer first. `clear_test.py` covers it end to end, including
+  `kill -9`. Business case, honest market sizing and risks: **`docs/CLEARING.md`**.
 - **Anonymous trading** (`src/privacy.rs`) — counterparties see a single-use alias per fill
   instead of each other's agent IDs, order/trade IDs are random rather than sequential, and
   de-anonymization is owner-only, requires a stated reason, and is permanently audit-logged.
@@ -141,6 +150,7 @@ python3 market_test.py       # prediction markets: payouts, rake, resolution int
 python3 credits_test.py      # deposits, cash out, reserve invariant, the promo/real-money barrier
 python3 route_test.py        # non-custodial routing: pricing, refusals, trial access
 python3 crash_test.py        # kill -9 a live server, prove nothing was lost
+python3 clear_test.py        # bot-to-bot netting: savings, fee guarantee, caps, settlement, crash
 ```
 
 There's also `bots/market-maker/market_maker.py` — a reference market maker that posts real
@@ -153,6 +163,8 @@ and, more importantly, what it isn't.
 - `docs/MARKETS.md` — how the prediction markets work, how the rake earns, why there is no
   liquidity requirement, how the forecast feed is sold, and why real money
   needs a licence before it needs code.
+- `docs/CLEARING.md` — Ikenga Clear: netting bot-to-bot payments, how it earns (a share of
+  savings), honest market sizing, competition, credit risk, and the API.
 - `docs/CUSTODY.md` — the two modes (custodial order book vs non-custodial router), which
   endpoints are which, how each one earns, and what's verified versus assumed. Read this before
   describing the platform to anyone as custodial or non-custodial.

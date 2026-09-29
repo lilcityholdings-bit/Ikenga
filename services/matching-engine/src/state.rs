@@ -151,6 +151,9 @@ pub struct AppState {
     /// The outside referee for disputed markets and the source of the public trust score shown
     /// beside each agent. See `agenttrust.rs`.
     pub agenttrust: crate::agenttrust::AgentTrust,
+    /// Multilateral netting for bot-to-bot payments. Non-custodial: it holds records, never
+    /// balances. See `clearing.rs`.
+    pub clearing: crate::clearing::ClearingHouse,
 }
 
 /// The identity the venue's own seed liquidity is booked against.
@@ -236,6 +239,7 @@ impl AppState {
             withdrawals: Mutex::new(Vec::new()),
             route_calls: Mutex::new(HashMap::new()),
             agenttrust,
+            clearing: crate::clearing::ClearingHouse::new(crate::clearing::ClearConfig::from_env()),
         }
     }
 
@@ -510,6 +514,26 @@ impl AppState {
                         };
                         m.winning_outcome = winning_outcome.map(|w| w as usize);
                     }
+                }
+                Record::ClearObligation {
+                    obligation_id, payer, payee, asset, amount_micros, memo, reference, created_at_ms,
+                } => self.clearing.replay_obligation(crate::clearing::Obligation {
+                    obligation_id,
+                    payer,
+                    payee,
+                    asset,
+                    amount_micros,
+                    memo,
+                    reference,
+                    created_at_ms,
+                }),
+                Record::ClearCycle { snapshot } => {
+                    if !self.clearing.replay_cycle(&snapshot) {
+                        eprintln!("WAL: a clearing cycle snapshot could not be read — skipped");
+                    }
+                }
+                Record::ClearStatus { instruction_id, status, tx_ref, .. } => {
+                    self.clearing.replay_status(&instruction_id, &status, tx_ref)
                 }
             }
         }
