@@ -157,7 +157,7 @@ async function studentHome() {
   show(
     h("div", { class: "card" },
       h("div", { class: "row" }, h("h1", {}, `Hi, ${me.nickname}!`)),
-      h("p", {}, "You're working at ", levelTag(lvl)),
+      h("p", {}, "Your estimated level: ", levelTag(lvl)),
       ladder(lvl),
       h("p", { class: "small muted" }, `${Math.round(me.level_progress * 100)}% of the way to ${nextName}`), bar(me.level_progress),
       h("p", {}),
@@ -172,18 +172,26 @@ async function studentHome() {
         bar(k.progress), h("span", { class: "small muted" }, k.n ? `${k.n} tried · rating ${k.rating}` : "not tried yet"));
     })),
     boardSlot,
-    h("p", { class: "small muted" }, `Your login code: ${me.login_code}`));
+    h("p", { class: "small muted" }, "Levels are early estimates. They get more accurate the more you play."),
+    h("p", { class: "small muted" }, `Your login code: ${me.login_code} · `,
+      h("button", { class: "link small", onclick: exportRecord }, "⬇ Download my learning record")));
   if (me.class && me.class.leaderboard) {
     try {
       const board = await api("GET", "/api/leaderboard", undefined, "student");
-      boardSlot.replaceChildren(h("h2", {}, "🏆 Class leaderboard"), h("div", { class: "card tablewrap" },
-        h("table", {}, h("thead", {}, h("tr", {}, ["#", "Nickname", "Level", "Rating", "Growth"].map((t) => h("th", {}, t)))),
+      boardSlot.replaceChildren(h("h2", {}, "🌱 Most growth in my class"), h("div", { class: "card tablewrap" },
+        h("table", {}, h("thead", {}, h("tr", {}, ["#", "Nickname", "Growth", "Challenges"].map((t) => h("th", {}, t)))),
           h("tbody", {}, board.map((r, i) => h("tr", {},
             h("td", {}, i + 1), h("td", {}, r.nickname === me.nickname ? h("strong", {}, `${r.nickname} (you)`) : r.nickname),
-            h("td", {}, h("span", { class: `tag lv${r.level}` }, levelName(r.level))), h("td", {}, r.overall),
-            h("td", {}, `${r.growth > 0 ? "+" : ""}${r.growth}`)))))));
+            h("td", {}, `${r.growth > 0 ? "+" : ""}${r.growth}`), h("td", {}, r.attempts)))))));
     } catch { /* leaderboard turned off meanwhile */ }
   }
+}
+
+async function exportRecord() {
+  const res = await fetch("/api/me/export", { headers: { "X-Student-Code": store.get("studentCode") || "" } });
+  if (!res.ok) return;
+  const url = URL.createObjectURL(await res.blob());
+  const a = h("a", { href: url, download: "my-ai-ladder-record.json" }); document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
 // ─────────────────────────── challenges ──────────────────────────
@@ -201,19 +209,41 @@ async function playNext() {
     let res;
     try { res = await api("POST", "/api/answer", { item_id: item.id, response: r.value() }, "student"); }
     catch (e) { err.textContent = e.message; checkBtn.disabled = false; inflight = false; return; }
+    if (res.checkin) return checkinSaved(res);
     r.lock(res.feedback);
     checkBtn.remove();
-    after.replaceChildren(result(res));
+    after.replaceChildren(result(res, item));
     after.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   setNav([["← My progress", studentHome]]);
-  show(h("div", { class: "card" },
+  show(item.checkin ? h("div", { class: "card feedback" }, h("strong", {}, `📋 Check-in ${item.checkin.n} of ${item.checkin.total}`),
+      h("p", { class: "small" }, "Just do your best! This doesn't change your level, and you won't see the answer. It helps your teacher see how much the class has learned.")) : "",
+    h("div", { class: "card" },
     h("div", { class: "row" }, levelTag(item.level), h("span", { class: "tag" }, `${skill.icon} ${skill.name}`)),
     h("p", { class: "prompt" }, item.prompt, sayBtn(item.prompt)),
     r.node, err, r.hideCheck ? null : checkBtn), after);
 }
 
-function result(res) {
+function checkinSaved(res) {
+  show(h("div", { class: "card hero" }, h("h1", {}, res.remaining ? "✅ Saved!" : "🎉 Check-in done!"),
+    h("p", {}, res.remaining ? `${res.remaining} check-in question${res.remaining > 1 ? "s" : ""} left.` : "Thanks! Now back to your challenges."),
+    h("button", { class: "primary big", onclick: playNext }, "Next ▶")));
+}
+
+function reportBox(item) {
+  const box = h("div", {});
+  const btn = h("button", { class: "link small", onclick: () => {
+    box.replaceChildren(h("p", { class: "small" }, "What's wrong with this question?"),
+      h("div", { class: "row" }, Object.entries(CUR.report_reasons).map(([k, label]) => h("button", { class: "small", onclick: async () => {
+        try { await api("POST", "/api/report", { item_id: item.id, reason: k }, "student"); box.replaceChildren(h("p", { class: "small muted" }, "Thanks! Your teacher will see this.")); }
+        catch (e) { box.replaceChildren(h("p", { class: "error" }, e.message)); }
+      } }, label))));
+  } }, "🚩 Something wrong with this question?");
+  box.append(btn);
+  return box;
+}
+
+function result(res, item) {
   const pct = Math.round(res.score * 100);
   const good = res.correct, ok = res.score >= 0.5;
   const d = res.rating_after - res.rating_before;
@@ -226,7 +256,8 @@ function result(res) {
       h("p", { class: "small" }, `${skillById(res.skill).name}: ${res.rating_before} → ${res.rating_after} `,
         h("span", { class: d >= 0 ? "delta-up" : "delta-down" }, `(${d >= 0 ? "+" : ""}${d})`))),
     h("button", { class: "primary big", onclick: playNext }, "Next challenge ▶"),
-    h("p", {}), h("button", { class: "choice", onclick: studentHome }, "See my progress"));
+    h("p", {}), h("button", { class: "choice", onclick: studentHome }, "See my progress"),
+    reportBox(item));
 }
 
 // Each renderer returns { node, value(), lock(feedback) }. onReady(bool) enables Check.
@@ -446,17 +477,25 @@ async function teacherDash() {
   const s = c.students;
   const avg = s.length ? Math.round(s.reduce((t, p) => t + p.overall, 0) / s.length) : null;
   const weakest = s.length ? CUR.skills.map((sk) => [sk, s.reduce((t, p) => t + p.skills[sk.id].rating, 0) / s.length]).sort((a, b) => a[1] - b[1])[0][0] : null;
+  const weekAgo = Date.now() / 1000 - 7 * 86400;
+  const activeWeek = s.filter((p) => p.attempts > 0 && p.last_active >= weekAgo).length;
+  const focus = h("select", { "aria-label": "Today's focus", onchange: async () => {
+    await api("PATCH", "/api/teacher/class", { focus: focus.value || null }, "teacher");
+  } }, h("option", { value: "" }, "Any skill (students get their weakest skills)"),
+    CUR.skills.map((sk) => h("option", { value: sk.id, selected: c.focus === sk.id }, `${sk.icon} ${sk.name}`)));
   const cards = h("div", { class: "cards" }, s.map((p) => h("div", { class: "lc" },
     h("strong", {}, "AI Ladder login"), h("p", {}, p.nickname), h("p", { class: "joincode" }, p.login_code), h("p", { class: "small" }, c.name))));
   show(
     h("div", { class: "card" }, h("h1", {}, c.name), h("p", {}, "Grade band: ", levelTag(c.band)),
       h("p", { class: "muted" }, "Class code for students:"), h("p", { class: "joincode" }, c.join_code),
-      h("label", { class: "check" }, lb, "Students can see the class leaderboard")),
+      h("label", { class: "check" }, lb, "Students can see the class growth board (ranks by improvement, not score)"),
+      h("label", {}, "Practice focus"), focus,
+      h("p", { class: "small muted" }, "Just taught a lesson on one topic? Set it here and the next practice session sticks to that skill.")),
     h("div", { class: "grid" },
-      h("div", { class: "card" }, h("p", { class: "muted small" }, "Students"), h("p", { class: "joincode" }, s.length)),
+      h("div", { class: "card" }, h("p", { class: "muted small" }, "Active this week"), h("p", { class: "joincode" }, `${activeWeek}/${s.length}`)),
       h("div", { class: "card" }, h("p", { class: "muted small" }, "Class average"),
         avg === null ? h("p", {}, "—") : h("p", {}, levelTag(CUR.level_floor.filter((f) => avg >= f).length - 1), ` rating ${avg}`)),
-      h("div", { class: "card" }, h("p", { class: "muted small" }, "Skill to focus on next"),
+      h("div", { class: "card" }, h("p", { class: "muted small" }, "Class's weakest skill"),
         weakest ? h("p", {}, h("strong", {}, `${weakest.icon} ${weakest.name}`), h("br"), h("span", { class: "small muted" }, weakest.blurb)) : h("p", {}, "—"))),
     h("div", { class: "row" },
       h("button", { onclick: exportCsv, disabled: !s.length }, "⬇ Download CSV (gradebook)"),
@@ -476,8 +515,45 @@ async function teacherDash() {
           if (!confirm(`Permanently delete ${p.nickname} and all their data?`)) return;
           await api("DELETE", `/api/teacher/students/${p.id}`, undefined, "teacher"); teacherDash();
         } }, "Delete"))))))),
-    h("p", { class: "small muted" }, "Cell color = level for that skill. Hover a cell for details. Ratings share one scale from kindergarten (≈500) to a bachelor's degree (≈2000+)."),
+    h("p", { class: "small muted" }, "Cell color = estimated level for that skill. Hover a cell for details. Levels are early estimates: use them as feedback, not grades, until your class has played for a few weeks."),
+    checkinSection(c, s),
+    reportSection(c.reports),
     cards);
+}
+
+function checkinSection(c, s) {
+  const open = c.checkins.find((k) => !k.closed);
+  const label = h("input", { maxlength: 40, placeholder: "e.g. Start of unit", "aria-label": "Check-in name" });
+  const pct = (v) => v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`;
+  const closed = c.checkins.filter((k) => k.closed);
+  const first = closed[0], last = closed.length > 1 ? closed[closed.length - 1] : null;
+  return h("div", {},
+    h("h2", {}, "📋 Before / after check-ins"),
+    h("div", { class: "card" },
+      h("p", { class: "small" }, "A check-in gives every student the same short set of questions (one per skill). It doesn't change their level and doesn't show answers. Run one before a unit and one after to see what your class really learned."),
+      open ? h("div", {}, h("p", {}, h("strong", {}, `“${open.label}” is open`), ` — ${open.completed} of ${s.length} students finished.`),
+        h("button", { onclick: async () => { await api("POST", "/api/teacher/checkins/close", {}, "teacher"); teacherDash(); } }, "Close check-in"))
+        : h("div", { class: "row" }, label, h("button", { onclick: async () => {
+          await api("POST", "/api/teacher/checkins", { label: label.value }, "teacher"); teacherDash(); } }, "Open a check-in")),
+      c.checkins.length ? h("div", { class: "tablewrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Student"), c.checkins.map((k) => h("th", {}, k.label)), last ? h("th", {}, "Change") : null)),
+        h("tbody", {},
+          s.map((p) => {
+            const cell = (k) => { const v = k.students[p.id]; return v ? (v.answered === k.total ? pct(v.score) : `${v.answered}/${k.total}`) : "—"; };
+            const a = first && first.students[p.id], b = last && last.students[p.id];
+            const both = a && b && a.answered === first.total && b.answered === last.total;
+            return h("tr", {}, h("td", {}, p.nickname), c.checkins.map((k) => h("td", {}, cell(k))),
+              last ? h("td", {}, both ? `${b.score >= a.score ? "+" : ""}${Math.round((b.score - a.score) * 100)} pts` : "—") : null);
+          }),
+          h("tr", {}, h("td", {}, h("strong", {}, "Class average")), c.checkins.map((k) => h("td", {}, h("strong", {}, pct(k.class_avg)))), last ? h("td", {}) : null)))) : null));
+}
+
+function reportSection(reports) {
+  if (!reports.length) return "";
+  return h("div", {}, h("h2", {}, "🚩 Questions students flagged"),
+    h("div", { class: "card" }, h("p", { class: "small muted" }, "Students can flag a question after answering it. Please pass real problems on so the question gets fixed for everyone."),
+      h("ul", {}, reports.map((r) => h("li", {}, h("strong", {}, r.prompt), " ",
+        h("span", { class: "small muted" }, Object.entries(r.reasons).map(([k, n]) => `${CUR.report_reasons[k]} ×${n}`).join(" · ")))))));
 }
 
 // ── boot ──

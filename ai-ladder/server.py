@@ -58,7 +58,22 @@ CREATE INDEX IF NOT EXISTS attempts_student ON attempts(student_id, id);
 CREATE TABLE IF NOT EXISTS pending (
   student_id INTEGER PRIMARY KEY REFERENCES students(id) ON DELETE CASCADE,
   item_id TEXT NOT NULL, state TEXT NOT NULL, issued REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS checkins (
+  id INTEGER PRIMARY KEY, class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  label TEXT NOT NULL, opened REAL NOT NULL, closed REAL);
+CREATE TABLE IF NOT EXISTS checkin_answers (
+  checkin_id INTEGER NOT NULL REFERENCES checkins(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL, score REAL NOT NULL, PRIMARY KEY (checkin_id, student_id, item_id));
+CREATE TABLE IF NOT EXISTS reports (
+  class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL, reason TEXT NOT NULL, ts REAL NOT NULL, PRIMARY KEY (student_id, item_id));
+CREATE TABLE IF NOT EXISTS calibration (
+  item_id TEXT PRIMARY KEY, difficulty REAL NOT NULL, n INTEGER NOT NULL, updated REAL NOT NULL);
 """
+# Columns added after the first release; _migrate() adds them to older databases.
+MIGRATIONS = [("classes", "focus", "TEXT"), ("attempts", "rating_before", "REAL")]
 
 
 def sha256(s):
@@ -86,7 +101,24 @@ class Store:
         if path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+        self.load_calibration()
         self.lock = threading.Lock()
+
+    def _migrate(self):
+        for table, col, decl in MIGRATIONS:
+            cols = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        self.db.commit()
+
+    def load_calibration(self):
+        """Apply difficulties measured from real students (see calibrate.py)."""
+        for it in content.ITEMS:
+            it.pop("calibrated_difficulty", None)
+        for r in self.db.execute("SELECT item_id, difficulty FROM calibration"):
+            if r["item_id"] in content.ITEMS_BY_ID:
+                content.ITEMS_BY_ID[r["item_id"]]["calibrated_difficulty"] = r["difficulty"]
 
     # ── accounts ──
     def create_class(self, name, band, leaderboard):
@@ -172,27 +204,58 @@ class Store:
             # Reloading the page returns the same challenge, so students can't
             # reroll until they get one they like.
             item = content.ITEMS_BY_ID[pend["item_id"]]
-            return self._reapply(item, json.loads(pend["state"]))
+            state = json.loads(pend["state"])
+            return self._decorate(sid, self._reapply(item, state), state)
+
+        band = st["band"]
+        ck = self.open_checkin(st["class_id"])
+        if ck:
+            done = {r["item_id"] for r in self.db.execute(
+                "SELECT item_id FROM checkin_answers WHERE checkin_id = ? AND student_id = ?", (ck["id"], sid))}
+            todo = [i for i in content.CHECKIN_IDS[band] if i not in done]
+            if todo:
+                item = content.ITEMS_BY_ID[todo[0]]
+                view, state = grading.serve(item, rng)
+                state["checkin"] = ck["id"]
+                return self._issue(sid, item, view, state)
 
         rs = self.ratings(sid)
-        band = st["band"]
         lo, hi = max(0, band - 1), min(len(content.LEVELS) - 1, band + 2)
         recent = {r["item_id"] for r in self.db.execute(
             "SELECT item_id FROM attempts WHERE student_id = ? ORDER BY id DESC LIMIT ?", (sid, RECENT_WINDOW))}
-        pool = [it for it in content.ITEMS if lo <= it["level"] <= hi]
+        held_out = set(content.CHECKIN_IDS[band])
+        pool = [it for it in content.ITEMS if lo <= it["level"] <= hi and it["id"] not in held_out]
         fresh = [it for it in pool if it["id"] not in recent] or pool
-        # Cover every skill: practice the one with the fewest attempts.
-        fewest = min(rs[s]["n"] for s in content.SKILL_IDS if any(it["skill"] == s for it in fresh))
-        skills = [s for s in content.SKILL_IDS if rs[s]["n"] == fewest and any(it["skill"] == s for it in fresh)]
-        skill = rng.choice(skills)
+        focus = None
+        if st["class_id"] is not None:
+            focus = self.db.execute("SELECT focus FROM classes WHERE id = ?", (st["class_id"],)).fetchone()["focus"]
+        if focus in content.SKILL_IDS and any(it["skill"] == focus for it in fresh):
+            # The teacher just taught this topic: practice it today.
+            skill = focus
+        else:
+            # Cover every skill: practice the one with the fewest attempts.
+            fewest = min(rs[s]["n"] for s in content.SKILL_IDS if any(it["skill"] == s for it in fresh))
+            skills = [s for s in content.SKILL_IDS if rs[s]["n"] == fewest and any(it["skill"] == s for it in fresh)]
+            skill = rng.choice(skills)
         cands = [it for it in fresh if it["skill"] == skill]
         target = rating.target_difficulty(rs[skill]["rating"])
         cands.sort(key=lambda it: abs(rating.difficulty(it) - target))
         item = rng.choice(cands[:3])
         view, state = grading.serve(item, rng)
+        return self._issue(sid, item, view, state)
+
+    def _issue(self, sid, item, view, state):
         self.db.execute("INSERT OR REPLACE INTO pending(student_id, item_id, state, issued) VALUES (?,?,?,?)",
                         (sid, item["id"], json.dumps(state), time.time()))
         self.db.commit()
+        return self._decorate(sid, view, state)
+
+    def _decorate(self, sid, view, state):
+        """Check-in questions are labelled so the student knows this one doesn't count."""
+        if "checkin" in state:
+            done = self.db.execute("SELECT COUNT(*) FROM checkin_answers WHERE checkin_id = ? AND student_id = ?",
+                                   (state["checkin"], sid)).fetchone()[0]
+            view["checkin"] = {"n": done + 1, "total": len(content.CHECKIN_IDS[view["level"]])}
         return view
 
     @staticmethod
@@ -221,20 +284,33 @@ class Store:
         if not pend or pend["item_id"] != item_id:
             raise ApiError(409, "that challenge isn't active — load the next one")
         item = content.ITEMS_BY_ID[item_id]
+        state = json.loads(pend["state"])
         try:
-            score, feedback = grading.grade(item, json.loads(pend["state"]), response)
+            score, feedback = grading.grade(item, state, response)
         except grading.BadResponse as e:
             raise ApiError(400, str(e))
+        now = time.time()
+        if "checkin" in state:
+            # Check-ins measure, they don't teach: no answer reveal (it would
+            # leak into the "after" check-in) and no rating change.
+            self.db.execute("INSERT OR IGNORE INTO checkin_answers(checkin_id, student_id, item_id, score)"
+                            " VALUES (?,?,?,?)", (state["checkin"], sid, item_id, score))
+            self.db.execute("DELETE FROM pending WHERE student_id = ?", (sid,))
+            self.db.execute("UPDATE students SET last_active = ? WHERE id = ?", (now, sid))
+            self.db.commit()
+            left = len(content.CHECKIN_IDS[item["level"]]) - self.db.execute(
+                "SELECT COUNT(*) FROM checkin_answers WHERE checkin_id = ? AND student_id = ?",
+                (state["checkin"], sid)).fetchone()[0]
+            return {"checkin": True, "remaining": left}
         r = self.db.execute("SELECT * FROM ratings WHERE student_id = ? AND skill = ?",
                             (sid, item["skill"])).fetchone()
         before = r["rating"]
         after = rating.update(before, r["n"], rating.difficulty(item), score)
-        now = time.time()
         self.db.execute("UPDATE ratings SET rating = ?, n = n + 1 WHERE student_id = ? AND skill = ?",
                         (after, sid, item["skill"]))
-        self.db.execute("INSERT INTO attempts(student_id, item_id, skill, level, score, delta, ts)"
-                        " VALUES (?,?,?,?,?,?,?)", (sid, item_id, item["skill"], item["level"], score,
-                                                    after - before, now))
+        self.db.execute("INSERT INTO attempts(student_id, item_id, skill, level, score, delta, ts, rating_before)"
+                        " VALUES (?,?,?,?,?,?,?,?)", (sid, item_id, item["skill"], item["level"], score,
+                                                      after - before, now, before))
         self.db.execute("DELETE FROM pending WHERE student_id = ?", (sid,))
         self.db.execute("UPDATE students SET last_active = ? WHERE id = ?", (now, sid))
         self.db.commit()
@@ -255,10 +331,54 @@ class Store:
         return out
 
     def leaderboard(self, class_id):
-        ros = self.roster(class_id)
-        ros.sort(key=lambda p: -p["overall"])
-        return [{"nickname": p["nickname"], "overall": p["overall"], "level": p["level"],
-                 "growth": p["growth"], "attempts": p["attempts"]} for p in ros]
+        # Ranked by growth, not raw rating: ratings are still early estimates,
+        # and growth is what every student can compete on fairly.
+        ros = [p for p in self.roster(class_id) if p["attempts"] > 0]
+        ros.sort(key=lambda p: (-p["growth"], -p["attempts"]))
+        return [{"nickname": p["nickname"], "level": p["level"], "growth": p["growth"],
+                 "attempts": p["attempts"]} for p in ros]
+
+    # ── check-ins (before/after measurement) ──
+    def open_checkin(self, class_id):
+        if class_id is None:
+            return None
+        return self.db.execute("SELECT * FROM checkins WHERE class_id = ? AND closed IS NULL", (class_id,)).fetchone()
+
+    def close_checkins(self, class_id):
+        self.db.execute("UPDATE checkins SET closed = ? WHERE class_id = ? AND closed IS NULL",
+                        (time.time(), class_id))
+        # A half-answered check-in question shouldn't linger as the student's next
+        # challenge, or get saved into whichever check-in comes next.
+        self.db.execute("DELETE FROM pending WHERE student_id IN (SELECT id FROM students WHERE class_id = ?)"
+                        " AND state LIKE '%\"checkin\"%'", (class_id,))
+
+    def checkin_results(self, class_id, band):
+        total = len(content.CHECKIN_IDS[band])
+        out = []
+        for ck in self.db.execute("SELECT * FROM checkins WHERE class_id = ? ORDER BY id", (class_id,)).fetchall():
+            per = {r["student_id"]: {"score": round(r["avg"], 3), "answered": r["n"]}
+                   for r in self.db.execute("SELECT student_id, AVG(score) avg, COUNT(*) n FROM checkin_answers"
+                                            " WHERE checkin_id = ? GROUP BY student_id", (ck["id"],))}
+            done = [v["score"] for v in per.values() if v["answered"] == total]
+            out.append({"id": ck["id"], "label": ck["label"], "opened": ck["opened"], "closed": ck["closed"],
+                        "total": total, "completed": len(done),
+                        "class_avg": round(sum(done) / len(done), 3) if done else None,
+                        "students": {str(k): v for k, v in per.items()}})
+        return out
+
+    # ── question reports (crowd-sourced content review) ──
+    def reports(self, class_id):
+        rows = self.db.execute("SELECT item_id, reason, COUNT(*) n FROM reports WHERE class_id = ?"
+                               " GROUP BY item_id, reason", (class_id,)).fetchall()
+        by_item = {}
+        for r in rows:
+            it = content.ITEMS_BY_ID.get(r["item_id"])
+            if not it:
+                continue
+            e = by_item.setdefault(r["item_id"], {"item_id": r["item_id"], "prompt": it["prompt"],
+                                                  "level": it["level"], "reasons": {}})
+            e["reasons"][r["reason"]] = r["n"]
+        return sorted(by_item.values(), key=lambda e: -sum(e["reasons"].values()))
 
 
 # ───────────────────────────── HTTP layer ─────────────────────────────
@@ -317,14 +437,25 @@ def make_handler(store, limiter):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _read_raw(self):
+            # Always drain the body before routing, even if the route (or an auth
+            # error) never looks at it: leftover bytes would be parsed as the start
+            # of the next request on this keep-alive connection.
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > MAX_BODY:
+                self.close_connection = True
+                self._raw = b""
+                raise ApiError(413 if n > MAX_BODY else 400, "bad request body")
+            self._raw = self.rfile.read(n) if n else b""
+
         def _body(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                raise ApiError(413, "request too large")
-            if n == 0:
+            if not self._raw:
                 return {}
             try:
-                data = json.loads(self.rfile.read(n))
+                data = json.loads(self._raw)
             except (ValueError, UnicodeDecodeError):
                 raise ApiError(400, "invalid JSON")
             if not isinstance(data, dict):
@@ -343,6 +474,7 @@ def make_handler(store, limiter):
         def _dispatch(self, method):
             path = urlparse(self.path).path
             try:
+                self._read_raw()
                 if method in ("GET", "HEAD") and not path.startswith("/api/"):
                     return self._static(path)
                 with store.lock:
@@ -386,6 +518,7 @@ def make_handler(store, limiter):
                 return 200, {"ok": True}
             if method == "GET" and path == "/api/curriculum":
                 return 200, {"levels": content.LEVELS, "skills": content.SKILLS,
+                             "report_reasons": content.REPORT_REASONS,
                              "level_floor": rating.LEVEL_FLOOR,
                              "counts": {lv["id"]: sum(1 for it in content.ITEMS if it["level"] == lv["id"])
                                         for lv in content.LEVELS}}
@@ -413,12 +546,32 @@ def make_handler(store, limiter):
                     if "name" in b and str(b["name"]).strip():
                         store.db.execute("UPDATE classes SET name = ? WHERE id = ?",
                                          (str(b["name"]).strip()[:60], c["id"]))
+                    if "focus" in b:
+                        if b["focus"] is not None and b["focus"] not in content.SKILL_IDS:
+                            raise ApiError(400, "unknown skill")
+                        store.db.execute("UPDATE classes SET focus = ? WHERE id = ?", (b["focus"], c["id"]))
                     store.db.commit()
                     c = self._teacher()
                 elif method != "GET":
                     raise ApiError(405, "method not allowed")
                 return 200, {"id": c["id"], "name": c["name"], "band": c["band"], "join_code": c["join_code"],
-                             "leaderboard": bool(c["leaderboard"]), "students": store.roster(c["id"])}
+                             "leaderboard": bool(c["leaderboard"]), "focus": c["focus"],
+                             "students": store.roster(c["id"]),
+                             "checkins": store.checkin_results(c["id"], c["band"]),
+                             "reports": store.reports(c["id"])}
+            if method == "POST" and path == "/api/teacher/checkins":
+                c = self._teacher()
+                label = str(self._body().get("label", "")).strip()[:40] or "Check-in"
+                store.close_checkins(c["id"])
+                cur = store.db.execute("INSERT INTO checkins(class_id, label, opened) VALUES (?,?,?)",
+                                       (c["id"], label, time.time()))
+                store.db.commit()
+                return 201, {"id": cur.lastrowid, "label": label}
+            if method == "POST" and path == "/api/teacher/checkins/close":
+                c = self._teacher()
+                store.close_checkins(c["id"])
+                store.db.commit()
+                return 200, {"closed": True}
             if method == "GET" and path == "/api/teacher/export.csv":
                 c = self._teacher()
                 buf = io.StringIO()
@@ -470,6 +623,33 @@ def make_handler(store, limiter):
                     "SELECT item_id, skill, level, score, delta, ts FROM attempts WHERE student_id = ?"
                     " ORDER BY id DESC LIMIT 10", (st["id"],))]
                 return 200, p
+            if method == "GET" and path == "/api/me/export":
+                # The student's (and family's) own copy of their learning record.
+                st = self._student()
+                p = store.profile(st)
+                p["attempts_log"] = [dict(r) for r in store.db.execute(
+                    "SELECT item_id, skill, level, score, ts FROM attempts WHERE student_id = ? ORDER BY id",
+                    (st["id"],))]
+                p["checkins"] = [dict(r) for r in store.db.execute(
+                    "SELECT c.label, a.item_id, a.score FROM checkin_answers a JOIN checkins c ON c.id = a.checkin_id"
+                    " WHERE a.student_id = ? ORDER BY c.id", (st["id"],))]
+                p["exported"] = time.time()
+                return 200, json.dumps(p, indent=2), "application/json", {
+                    "Content-Disposition": 'attachment; filename="my-ai-ladder-record.json"'}
+            if method == "POST" and path == "/api/report":
+                st = self._student()
+                b = self._body()
+                item_id, reason = str(b.get("item_id", "")), b.get("reason")
+                if reason not in content.REPORT_REASONS:
+                    raise ApiError(400, "pick a reason")
+                seen = store.db.execute("SELECT 1 FROM attempts WHERE student_id = ? AND item_id = ?",
+                                        (st["id"], item_id)).fetchone()
+                if not seen:
+                    raise ApiError(404, "you haven't answered that challenge")
+                store.db.execute("INSERT OR REPLACE INTO reports(class_id, student_id, item_id, reason, ts)"
+                                 " VALUES (?,?,?,?,?)", (st["class_id"], st["id"], item_id, reason, time.time()))
+                store.db.commit()
+                return 200, {"reported": True}
             if method == "GET" and path == "/api/next":
                 return 200, store.next_item(self._student(), random.Random(secrets.randbits(64)))
             if method == "POST" and path == "/api/answer":

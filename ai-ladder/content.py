@@ -547,3 +547,25 @@ mc("q5c", 5, "prompting", 2,
 
 
 ITEMS_BY_ID = {it["id"]: it for it in ITEMS}
+
+
+def _checkin_items(level):
+    """One fixed challenge per skill at this level (prefer the mid-difficulty one).
+
+    Check-ins use the same questions every time, so a before/after comparison
+    measures learning rather than which questions a student happened to draw.
+    These challenges are kept out of normal practice for that band, so students
+    can't simply memorize them between check-ins.
+    """
+    out = []
+    for sk in SKILL_IDS:
+        cands = sorted((it for it in ITEMS if it["level"] == level and it["skill"] == sk),
+                       key=lambda it: (it["tier"] != 2, it["id"]))
+        out.append(cands[0]["id"])
+    return out
+
+
+CHECKIN_IDS = {lv["id"]: _checkin_items(lv["id"]) for lv in LEVELS}
+REPORT_REASONS = {"wrong": "The answer seems wrong",
+                  "confusing": "The question is confusing",
+                  "reading": "Too hard to read for my grade"}

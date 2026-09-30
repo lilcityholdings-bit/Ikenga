@@ -12,7 +12,8 @@ level") and which skill the class needs next.
 ```bash
 cd ai-ladder
 python3 server.py          # open http://localhost:8080
-python3 test_ladder.py     # 15 tests: content, grading, ratings, full HTTP classroom flow
+python3 test_ladder.py     # 22 tests: content, grading, ratings, calibration, full HTTP classroom flow
+python3 calibrate.py       # after a pilot: measure real question difficulty + list flagged questions
 ```
 
 Only Python 3.9+ is required: no packages, no build step, no internet. With Docker:
@@ -53,18 +54,26 @@ guidance builds on. The sixth covers hands-on use of AI tools:
 | **Teach the robot** | Label training examples; a **real nearest-neighbour model** trained on *your* labels is tested on new examples. Mislabel, and the robot learns your mistakes. |
 | **Tune gradient descent** | Pick a learning rate and watch the loss curve converge or blow up. |
 
+**Strategy and pilot plan:** see [PLAN.md](PLAN.md).
+
 ## How ranking works
+
+Levels are **estimates**, and the app says so. Treat them as feedback, not grades, until a class has
+played for a few weeks and difficulties have been calibrated.
 
 - Every student has a rating per skill, and every challenge a difficulty, on **one scale**:
   K-2 starts at 500, a bachelor's degree at 2000.
+- Challenge difficulties start as the author's guesses. After real students play,
+  **`calibrate.py` measures each challenge's true difficulty** from their results (30+ attempts by
+  default) and, with `--apply`, the rating system uses the measured values.
 - Ratings update **Elo-style** with partial credit: beating a hard challenge moves you up a lot,
   missing an easy one moves you down. New students move fast (placement), then settle.
 - The next challenge is **adaptive**. It picks the skill you've practised least, at a difficulty
   slightly below your rating (about 64% expected success), from one level below your class band to
   two above. It won't repeat a challenge you saw in your last 20.
 - The **overall level** is the average of all six skills, so breadth matters.
-- **Leaderboards show growth next to rank**, so improvement counts. They're off by default for
-  K-5, and teachers can toggle them for any class.
+- **The class board ranks by growth, not score**, and never shows classmates' raw ratings. It's off
+  by default for K-5, and teachers can toggle it for any class.
 - Answers never reach the browser before submission, grading happens on the server, and each
   student can only answer the one challenge they were issued. A student can't farm their rating by
   resubmitting.
@@ -73,12 +82,27 @@ guidance builds on. The sixth covers hands-on use of AI tools:
 
 Create a class in 30 seconds and share a 6-letter class code. The dashboard shows:
 
-- every student's level and growth
+- every student's estimated level and growth
 - a per-skill heatmap
 - the class's weakest skill
+- **Active this week:** the pilot's main usage measure
 - a CSV export for gradebooks
 - printable login cards
 - one-click permanent deletion of a student's data
+
+Three features make AI Ladder fit around real lessons:
+
+- **Practice focus.** Just taught a lesson on bias? Set the focus to Societal Impact, and practice
+  sticks to that skill until you clear it.
+- **Before / after check-ins.** Every student gets the same 6 questions (one per skill, at the class's
+  level). Answers aren't revealed and ratings don't change, so the "after" check-in is a fair
+  comparison. Check-in questions are also held out of normal practice so students can't memorize
+  them. The dashboard shows each student's change.
+- **Flagged questions.** After answering, a student can flag a question as wrong, confusing, or too
+  hard to read, choosing from 3 fixed reasons (no free text, so no personal info). Teachers see the
+  flags, and `calibrate.py` lists them as the content-review queue.
+
+Students (and their families) can **download their full learning record** as a file at any time.
 
 ## Privacy and school adoption
 

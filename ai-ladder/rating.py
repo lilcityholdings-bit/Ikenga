@@ -15,8 +15,28 @@ TIER_OFFSET = {1: -100, 2: 0, 3: 100}
 LEVEL_FLOOR = [0, 650, 950, 1250, 1550, 1850]
 
 
-def difficulty(item):
+def authored_difficulty(item):
+    """The difficulty the content author estimated. A guess until real students play."""
     return LEVEL_BASE[item["level"]] + TIER_OFFSET[item["tier"]]
+
+
+def difficulty(item):
+    # Once calibrate.py has measured an item from real attempts, trust the data.
+    return item.get("calibrated_difficulty", authored_difficulty(item))
+
+
+def fit_difficulty(ratings, scores):
+    """The difficulty at which these students' expected scores average out to
+    their actual average score (bisection; expected() falls as difficulty rises)."""
+    target = sum(scores) / len(scores)
+    lo, hi = -1000.0, 4000.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if sum(expected(r, mid) for r in ratings) / len(ratings) > target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
 
 
 def expected(rating, diff):

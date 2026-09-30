@@ -6,6 +6,7 @@
 import json
 import os
 import random
+import sqlite3
 import threading
 import unittest
 import urllib.error
@@ -140,6 +141,21 @@ class RatingTest(unittest.TestCase):
         self.assertEqual(rating.level_of(r), 5)
 
 
+class CalibrationTest(unittest.TestCase):
+    def test_fit_recovers_true_difficulty(self):
+        rng = random.Random(5)
+        true_d = 1300
+        ratings = [rng.uniform(900, 1700) for _ in range(4000)]
+        scores = [1.0 if rng.random() < rating.expected(r, true_d) else 0.0 for r in ratings]
+        self.assertLess(abs(rating.fit_difficulty(ratings, scores) - true_d), 40)
+
+    def test_checkin_items_one_per_skill_at_level(self):
+        for lv, ids in content.CHECKIN_IDS.items():
+            items = [content.ITEMS_BY_ID[i] for i in ids]
+            self.assertEqual([it["skill"] for it in items], content.SKILL_IDS)
+            self.assertTrue(all(it["level"] == lv for it in items))
+
+
 class ApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -221,6 +237,152 @@ class ApiTest(unittest.TestCase):
                                    headers={"X-Teacher-Key": other["teacher_key"]})[0], 404)
         self.assertEqual(self.call("DELETE", f"/api/teacher/students/{me['id']}", headers=tk)[0], 200)
         self.assertEqual(self.call("GET", "/api/me", headers=sk)[0], 401)
+
+    def new_class(self, band=2):
+        cls = self.call("POST", "/api/classes", {"name": "Pilot", "band": band})[1]
+        return cls, {"X-Teacher-Key": cls["teacher_key"]}
+
+    def new_student(self, cls, nick):
+        me = self.call("POST", "/api/join", {"join_code": cls["join_code"], "nickname": nick})[1]
+        return me, {"X-Student-Code": me["login_code"]}
+
+    def answer_perfectly(self, me, sk):
+        view = self.call("GET", "/api/next", headers=sk)[1]
+        return view, self.call("POST", "/api/answer", {"item_id": view["id"],
+                                                       "response": self.perfect(me["login_code"], view)}, sk)[1]
+
+    def test_checkin_before_after(self):
+        cls, tk = self.new_class(band=2)
+        me, sk = self.new_student(cls, "Nova")
+        ids = content.CHECKIN_IDS[2]
+        self.assertEqual(self.call("POST", "/api/teacher/checkins", {"label": "Before"}, tk)[0], 201)
+
+        # Every check-in question comes first, in order; no answers revealed, ratings untouched.
+        start = self.call("GET", "/api/me", headers=sk)[1]["overall"]
+        for i, want in enumerate(ids):
+            view, res = self.answer_perfectly(me, sk)
+            self.assertEqual(view["id"], want)
+            self.assertEqual(view["checkin"], {"n": i + 1, "total": len(ids)})
+            self.assertEqual(res, {"checkin": True, "remaining": len(ids) - i - 1})
+        self.assertEqual(self.call("GET", "/api/me", headers=sk)[1]["overall"], start)
+
+        # Then normal practice resumes, and it never serves the held-out check-in questions.
+        for _ in range(12):
+            view, res = self.answer_perfectly(me, sk)
+            self.assertNotIn(view["id"], ids)
+            self.assertNotIn("checkin", view)
+        self.call("POST", "/api/teacher/checkins/close", {}, tk)
+
+        self.call("POST", "/api/teacher/checkins", {"label": "After"}, tk)
+        self.answer_perfectly(me, sk)  # answers 1 of 6, leaves one pending
+        self.call("GET", "/api/next", headers=sk)
+        self.call("POST", "/api/teacher/checkins/close", {}, tk)
+        # Closing drops the half-done check-in question; practice resumes.
+        self.assertNotIn("checkin", self.call("GET", "/api/next", headers=sk)[1])
+
+        # Opening a new check-in while a question from the old one is pending drops that question.
+        self.answer_perfectly(me, sk)  # finish the practice question already waiting
+        self.call("POST", "/api/teacher/checkins", {"label": "Extra"}, tk)
+        stale = self.call("GET", "/api/next", headers=sk)[1]
+        self.assertIn("checkin", stale)
+        self.call("POST", "/api/teacher/checkins", {"label": "Extra 2"}, tk)
+        self.assertEqual(self.call("POST", "/api/answer", {"item_id": stale["id"], "response": 0}, sk)[0], 409)
+        self.call("POST", "/api/teacher/checkins/close", {}, tk)
+
+        cks = self.call("GET", "/api/teacher/class", headers=tk)[1]["checkins"]
+        self.assertEqual([k["label"] for k in cks], ["Before", "After", "Extra", "Extra 2"])
+        self.assertEqual(cks[0]["class_avg"], 1.0)
+        self.assertEqual(cks[0]["completed"], 1)
+        self.assertEqual(cks[1]["students"][str(me["id"])]["answered"], 1)
+        self.assertEqual(cks[1]["completed"], 0)
+
+    def test_focus_reports_export_growth_board(self):
+        cls, tk = self.new_class(band=3)
+        me, sk = self.new_student(cls, "Orbit")
+        self.assertEqual(self.call("PATCH", "/api/teacher/class", {"focus": "nonsense"}, tk)[0], 400)
+        self.call("PATCH", "/api/teacher/class", {"focus": "impact"}, tk)
+        seen = []
+        for _ in range(4):
+            view, res = self.answer_perfectly(me, sk)
+            seen.append(view)
+            self.assertEqual(view["skill"], "impact")
+
+        # Reports: only for challenges the student actually answered; one per student per question.
+        self.assertEqual(self.call("POST", "/api/report", {"item_id": "p5a", "reason": "wrong"}, sk)[0], 404)
+        self.assertEqual(self.call("POST", "/api/report", {"item_id": seen[0]["id"], "reason": "rude"}, sk)[0], 400)
+        for reason in ("wrong", "confusing"):
+            self.assertEqual(self.call("POST", "/api/report", {"item_id": seen[0]["id"], "reason": reason}, sk)[0], 200)
+        reps = self.call("GET", "/api/teacher/class", headers=tk)[1]["reports"]
+        self.assertEqual(reps, [{"item_id": seen[0]["id"], "prompt": content.ITEMS_BY_ID[seen[0]["id"]]["prompt"],
+                                 "level": seen[0]["level"], "reasons": {"confusing": 1}}])
+
+        st, raw = self.call("GET", "/api/me/export", headers=sk, raw=True)
+        rec = json.loads(raw)
+        self.assertEqual((st, rec["nickname"], len(rec["attempts_log"])), (200, "Orbit", 4))
+
+        # Growth board ranks by improvement and hides raw ratings and students who haven't played.
+        self.new_student(cls, "Idle")
+        self.call("PATCH", "/api/teacher/class", {"leaderboard": True}, tk)
+        board = self.call("GET", "/api/leaderboard", headers=sk)[1]
+        self.assertEqual([r["nickname"] for r in board], ["Orbit"])
+        self.assertNotIn("overall", board[0])
+
+    def test_calibrate_script(self):
+        import calibrate
+        cls, tk = self.new_class(band=0)
+        me, sk = self.new_student(cls, "Pip")
+        for _ in range(10):
+            self.answer_perfectly(me, sk)
+        with self.store.lock:
+            results = calibrate.measure(self.store.db, min_n=1)
+        self.assertTrue(results)
+        for r in results:
+            self.assertEqual(r["avg_score"], 1.0)
+            self.assertGreater(r["guess"], r["measured"])  # everyone got it right, so it's easier than guessed
+
+    def test_migrates_old_database(self):
+        """A database from the first release (no focus / rating_before columns) upgrades in place."""
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE classes (id INTEGER PRIMARY KEY, name TEXT NOT NULL, band INTEGER NOT NULL,
+              join_code TEXT UNIQUE NOT NULL, teacher_key_hash TEXT UNIQUE NOT NULL,
+              leaderboard INTEGER NOT NULL, created REAL NOT NULL);
+            CREATE TABLE attempts (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL, item_id TEXT NOT NULL,
+              skill TEXT NOT NULL, level INTEGER NOT NULL, score REAL NOT NULL, delta REAL NOT NULL, ts REAL NOT NULL);
+            INSERT INTO classes VALUES (1, 'Old class', 2, 'ABCDEF', 'x', 1, 0);""")
+        old.commit()
+        old.close()
+        st = server.Store(path)
+        self.assertIn("focus", {r["name"] for r in st.db.execute("PRAGMA table_info(classes)")})
+        self.assertIn("rating_before", {r["name"] for r in st.db.execute("PRAGMA table_info(attempts)")})
+        self.assertEqual(st.db.execute("SELECT name FROM classes").fetchone()[0], "Old class")
+
+    def test_keepalive_unread_body_does_not_corrupt_next_request(self):
+        """Browsers reuse connections. A body the route never reads (or that an auth
+        error skipped) must not be parsed as the start of the next request."""
+        import http.client
+        cls, tk = self.new_class()
+        conn = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1])
+        hdrs = {"Content-Type": "application/json", **tk}
+        for method, path, body, want in [
+            ("POST", "/api/teacher/checkins/close", "{}", 200),                     # route ignores the body
+            ("POST", "/api/teacher/checkins", '{"label": "x"}', 201),
+            ("GET", "/api/teacher/class", None, 200),
+        ]:
+            conn.request(method, path, body=body, headers=hdrs)
+            r = conn.getresponse()
+            r.read()
+            self.assertEqual(r.status, want, path)
+        conn.request("POST", "/api/teacher/checkins", body='{"label": "y"}',
+                     headers={"Content-Type": "application/json", "X-Teacher-Key": "wrong"})
+        r = conn.getresponse(); r.read()
+        self.assertEqual(r.status, 401)
+        conn.request("GET", "/api/teacher/class", headers=tk)
+        r = conn.getresponse(); r.read()
+        self.assertEqual(r.status, 200)
+        conn.close()
 
     def test_solo_and_validation(self):
         self.assertEqual(self.call("POST", "/api/join", {"nickname": "Ada", "band": 5})[0], 201)
