@@ -51,7 +51,7 @@ pub fn overview(state: &AppState) -> Response {
                      saved you, and nothing if it saved you nothing.",
                 ),
             ),
-            ("custody", Json::str("none — this service holds records, never money. You settle instructions from your own wallet.")),
+            ("custody", Json::str("none — this service holds records only. It never holds or moves money; you settle instructions from your own wallet.")),
             (
                 "pricing",
                 Json::obj(vec![

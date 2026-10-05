@@ -1,5 +1,11 @@
 # Ikenga Clear — a clearinghouse for bot-to-bot payments
 
+> **Status note (Oct 2026):** this file describes the first Clear design: netting payments
+> *between* bots. The launch product is now usage billing for MCP servers and APIs, paid into the
+> service owner's own Stripe account (see `clear/README.md`). Ikenga never holds or moves money in
+> either design. The pricing below (a share of savings) is the old design's and is not the launch
+> pricing.
+
 **One line:** bots record what they owe each other instead of paying every time; each cycle
 Ikenga nets everything and each bot makes or receives the fewest transfers that settle it. Ikenga
 keeps a share of the fees that saved, and nothing if it saved nothing.
@@ -48,7 +54,7 @@ today. It applied to bots:
 3. **Settle the minimum.** Net positions become transfers. There are never more than
    (number of bots with a non-zero position − 1) transfers, however many payments went in.
 4. **Bots pay each other directly.** The payer sends from its own wallet and the recipient
-   confirms receipt (`/confirm`). Ikenga never holds the money.
+   confirms receipt (`/confirm`). Ikenga never holds or moves money.
 
 **Measured in `clear_test.py`:** 4 bots, 49 micro-payments worth $5.82 → 4 transfers moving
 $1.61. Card-rail cost dropped from $14.87 to $0.95. Three bots trading $1,800 in a loop in $20

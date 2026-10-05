@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 *-agent.json
 ikenga-agent.json
+clear/demo_page.html
