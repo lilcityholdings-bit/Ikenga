@@ -2,7 +2,7 @@
 
 > **Status note (Oct 2026):** this file describes the first Clear design: netting payments
 > *between* bots. The launch product is now usage billing for MCP servers and APIs, paid into the
-> service owner's own Stripe account (see `clear/README.md`). Ikenga never holds or moves money in
+> service owner's own Stripe account (see `clear/README.md`). Ikenga (now Keptvow) never holds or moves money in
 > either design. The pricing below (a share of savings) is the old design's and is not the launch
 > pricing.
 

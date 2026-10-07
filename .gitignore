@@ -8,3 +8,5 @@ __pycache__/
 *-agent.json
 ikenga-agent.json
 clear/demo_page.html
+clear/data/
+__pycache__/
