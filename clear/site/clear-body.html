@@ -1,0 +1,142 @@
+<title>Keptvow Clear</title>
+<style>
+  /* Layout: Keptvow's own look (system type, blue accent, white panels): a centered hero, then short stacked sections. */
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #15171a; --muted: #5f646b; --line: #e2e0d8;
+    --accent: #3b4fd8; --accent-ink: #ffffff; --soft: #eceffc;
+    --ok: #12805c; --ok-bg: #e5f4ed; --careful: #a86200; --careful-bg: #fbf0dc; --stop: #c4302b; --stop-bg: #fbe7e5;
+    --shadow: 0 1px 2px rgba(20, 20, 30, .04), 0 8px 24px rgba(20, 20, 30, .06);
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #101215; --panel: #181b1f; --ink: #eceef0; --muted: #9ba1a8; --line: #2a2e34;
+    --accent: #8b9cff; --accent-ink: #0c1024; --soft: #1e2336;
+    --ok: #5fd3a2; --ok-bg: #12291f; --careful: #f2b45a; --careful-bg: #2c2312; --stop: #ff8a80; --stop-bg: #2f1716;
+    --shadow: none; color-scheme: dark } }
+  :root[data-theme="dark"] {
+    --bg: #101215; --panel: #181b1f; --ink: #eceef0; --muted: #9ba1a8; --line: #2a2e34;
+    --accent: #8b9cff; --accent-ink: #0c1024; --soft: #1e2336;
+    --ok: #5fd3a2; --ok-bg: #12291f; --careful: #f2b45a; --careful-bg: #2c2312; --stop: #ff8a80; --stop-bg: #2f1716;
+    --shadow: none; color-scheme: dark }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  .wrap { max-width: 920px; margin: 0 auto; padding-inline: 16px; padding-block: 0 56px; }
+  nav { display: flex; align-items: center; gap: 18px; padding-block: 16px; font-size: .95rem; }
+  nav .brand { font-weight: 800; font-size: 1.15rem; color: var(--ink); text-decoration: none; margin-right: auto; letter-spacing: -.01em; }
+  nav a:not(.brand) { color: var(--muted); text-decoration: none; }
+  .soon { display: inline-block; font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--accent); background: var(--soft); padding: 4px 12px; border-radius: 999px; }
+  .hero { text-align: center; padding-block: 40px 24px; display: grid; gap: 14px; justify-items: center; }
+  .hero h1 { font-size: clamp(2rem, 5.5vw, 3rem); line-height: 1.1; letter-spacing: -.02em; margin: 0; text-wrap: balance; max-width: 760px; }
+  .hero p { color: var(--muted); font-size: 1.1rem; max-width: 620px; margin: 0; }
+  h2 { font-size: 1.45rem; letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+  section { padding-block: 36px 0; display: grid; gap: 16px; }
+  .lead { color: var(--muted); margin: 0; max-width: 66ch; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); min-width: 0; }
+  .card h3 { margin: 0 0 6px; font-size: 1.05rem; }
+  .card p { margin: 0; color: var(--muted); font-size: .95rem; }
+  .step { font-weight: 800; color: var(--accent); font-size: .85rem; letter-spacing: .04em; display: block; margin-bottom: 6px; }
+  .checks { display: grid; gap: 10px; }
+  .check { display: flex; gap: 12px; align-items: flex-start; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  .tag { flex: none; font-weight: 800; letter-spacing: .06em; font-size: .78rem; padding: 3px 10px; border-radius: 999px; }
+  .tag.ok { background: var(--ok-bg); color: var(--ok); }
+  .tag.careful { background: var(--careful-bg); color: var(--careful); }
+  .tag.stop { background: var(--stop-bg); color: var(--stop); }
+  .check p { margin: 0; color: var(--muted); font-size: .95rem; }
+  .check b { color: var(--ink); }
+  .money { background: var(--soft); border-radius: 16px; padding: 18px; }
+  .money p { margin: 0; max-width: 66ch; }
+  form { display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); max-width: 560px; }
+  label { font-size: .85rem; font-weight: 650; }
+  input, select { font: inherit; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); width: 100%; }
+  button { font: inherit; font-weight: 650; padding: 12px 20px; border-radius: 11px; border: 0; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .fine { color: var(--muted); font-size: .85rem; margin: 0; }
+</style>
+
+<div class="wrap">
+  <nav><a class="brand" href="/">Keptvow</a><a href="/docs">Docs</a><a href="/trust">Check a bot</a></nav>
+
+  <header class="hero">
+    <span class="soon">Clear · launching January 2027</span>
+    <h1>Get paid when AI agents use your tools</h1>
+    <p>You built an MCP server or an API. Agents want to use it. Clear checks each agent before you
+      serve it, counts what it uses, and sends its owner a bill every month. The money goes straight
+      into your own Stripe account.</p>
+  </header>
+
+  <section>
+    <h2>The problem</h2>
+    <p class="lead">Agents don't have credit cards or sign-up forms. Charging them means building
+      metering, invoicing and collections yourself, and then hoping an agent you've never heard of
+      actually pays. So most tools for agents end up free, or locked away.</p>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <div class="grid">
+      <div class="card"><span class="step">1 · CHECK</span><h3>Before you serve</h3>
+        <p>Clear looks up the agent's Keptvow record and its owner's spending limit, and tells you
+          to serve it or not.</p></div>
+      <div class="card"><span class="step">2 · COUNT</span><h3>After you serve</h3>
+        <p>One line in your server reports the call. Retries are counted once. Prices can be
+          fractions of a cent.</p></div>
+      <div class="card"><span class="step">3 · BILL</span><h3>Once a month</h3>
+        <p>Each agent owner gets one invoice from your Stripe account and pays you directly.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Serve agents you've never met</h2>
+    <div class="checks">
+      <div class="check"><span class="tag ok">SERVE</span><p><b>A good Keptvow record.</b> Served, billed at month end.</p></div>
+      <div class="check"><span class="tag careful">LIMIT</span><p><b>No record yet.</b> Served up to a small starting limit you choose, until it earns more.</p></div>
+      <div class="check"><span class="tag stop">REFUSE</span><p><b>A bad record, or an unpaid bill anywhere on Clear.</b> Refused until it's sorted out.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Who it's for</h2>
+    <div class="grid">
+      <div class="card"><h3>Tool and API builders</h3>
+        <p>Turn agent traffic into monthly income without building billing or chasing payments.</p></div>
+      <div class="card"><h3>Agent owners</h3>
+        <p>Set a monthly spending cap for each agent. No service can charge past it.</p></div>
+      <div class="card"><h3>Agents with a good record</h3>
+        <p>Paying bills on time raises their Keptvow score, which opens more doors.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="money"><p><b>Keptvow never holds your money.</b> Bills are sent from your own Stripe
+      account and paid to you directly. Clear counts, checks and writes the bill.</p></div>
+  </section>
+
+  <section id="waitlist">
+    <h2>Join the pilot</h2>
+    <p class="lead">We're looking for a few tool builders to try Clear in test mode before launch.
+      No real money moves during the pilot. Pricing will be announced before launch.</p>
+    <form id="join">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required placeholder="you@company.com" autocomplete="email">
+      <label for="role">I want to</label>
+      <select id="role" name="role">
+        <option value="service">Charge agents for my MCP server or API</option>
+        <option value="owner">Pay for services my agents use</option>
+        <option value="both">Both</option>
+      </select>
+      <button type="submit">Join the pilot</button>
+      <p class="fine" id="thanks" hidden>Preview only: nothing was saved. On keptvow.com this will add you to the pilot list.</p>
+      <p class="fine">Preview: this form doesn't save sign-ups yet.</p>
+    </form>
+  </section>
+</div>
+
+<script>
+  document.getElementById("join").addEventListener("submit", function (e) {
+    e.preventDefault();
+    document.getElementById("thanks").hidden = false;
+    e.target.querySelector("button").disabled = true;
+  });
+</script>
