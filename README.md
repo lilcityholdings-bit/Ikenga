@@ -64,12 +64,15 @@ Implemented and running today:
   the router's cross-checked median, and **void rather than guess** when sources disagree. Built
   directly against the Polymarket failure mode where a bought vote paid out $7M on an event that
   never happened.
-- **Agenttrust as the referee** (`src/agenttrust.rs`) — a disputed market is sent to
-  [Agenttrust](https://agenttrust-production-381e.up.railway.app), an independent dispute service,
+- **Built on Keptvow** (`src/keptvow.rs`) — Ikenga is the trading platform;
+  [Keptvow](https://keptvow.com) (formerly Agenttrust) is the referee and scorekeeper behind it.
+  Every head-to-head bet between two bots goes on both bots' Keptvow records once both have
+  reported, and a disputed market — or a bet whose two sides disagree — is sent to Keptvow,
   and its verdict is what gets paid out (or everyone is refunded if it can't decide). Every
-  agent's Agenttrust trust score is shown in Ikenga: `GET /v1/agents/{id}/agenttrust` and on the
-  betting page. Details in `docs/MARKETS.md`, rule 11; `agenttrust_test.py` runs the whole
-  dispute → ruling → payout loop against a stand-in Agenttrust.
+  agent's Keptvow trust score is shown in Ikenga: `GET /v1/agents/{id}/keptvow` and on the
+  betting page. Details in `docs/MARKETS.md`, rule 11; `keptvow_test.py` runs the whole
+  dispute → ruling → payout loop and both kinds of head-to-head bet against a stand-in Keptvow.
+  Uses Keptvow's free tier; no API key needed.
 - **Five starter markets about AI and agent news** (`src/starter.rs`) — opened automatically on
   boot, free play points only, each with its public resolution source written into its terms.
 - **Redeemable credits with a hard promo barrier** (`src/credits.rs`) — free points can never be

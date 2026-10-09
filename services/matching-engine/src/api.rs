@@ -660,14 +660,14 @@ pub fn get_account(state: &AppState, req: &Request) -> Response {
                 Json::num(state.trust.get_forecast_score(&agent_id) as f64),
             ),
             ("rate_limit_per_sec", Json::num(band.rate_limit_per_sec() as f64)),
-            // Your public score on Agenttrust, the outside referee for disputes. Fetched live
-            // from GET /v1/agents/{id}/agenttrust; linked here so it's one step away.
+            // Your public score on Keptvow, the outside referee for disputes. Fetched live
+            // from GET /v1/agents/{id}/keptvow; linked here so it's one step away.
             (
-                "agenttrust",
-                match state.agenttrust.profile_url(&agent_id) {
+                "keptvow",
+                match state.keptvow.profile_url(&agent_id) {
                     Some(url) => Json::obj(vec![
-                        ("agenttrust_id", Json::str(state.agenttrust.agenttrust_id(&agent_id))),
-                        ("score_url", Json::str(format!("/v1/agents/{agent_id}/agenttrust"))),
+                        ("keptvow_id", Json::str(state.keptvow.keptvow_id(&agent_id))),
+                        ("score_url", Json::str(format!("/v1/agents/{agent_id}/keptvow"))),
                         ("profile_url", Json::str(url)),
                     ]),
                     None => Json::Null,
@@ -734,9 +734,9 @@ pub const PUBLIC_READ_PER_SEC: u32 = 60;
 
 pub const FEED_REQUESTS_PER_SEC: u32 = 5;
 
-/// Per-IP ceiling on `GET /v1/agents/{id}/agenttrust`. Generous for a person loading a page; low
-/// enough that nobody can use this server to hammer Agenttrust.
-pub const AGENTTRUST_REQUESTS_PER_SEC: u32 = 5;
+/// Per-IP ceiling on `GET /v1/agents/{id}/keptvow`. Generous for a person loading a page; low
+/// enough that nobody can use this server to hammer Keptvow.
+pub const KEPTVOW_REQUESTS_PER_SEC: u32 = 5;
 
 /// How many markets `GET /v1/markets` returns by default, and the most it will return at all.
 /// Live markets come first, so the default comfortably covers everything actually bettable on
@@ -2227,13 +2227,19 @@ pub fn report_outcome(state: &AppState, req: &Request, market_id: &str) -> Respo
             200,
             &Json::obj(vec![
                 ("status", Json::str("disagreed")),
+                ("resolver", Json::str(if state.keptvow.resolves_disputes() { "keptvow" } else { "operator" })),
                 (
                     "detail",
-                    Json::str(
+                    Json::str(if state.keptvow.resolves_disputes() {
+                        "The two of you reported different outcomes, so Keptvow, an independent \
+                         referee, decides who was right and that is what gets paid. If it can't \
+                         decide, or nobody decides in time, it voids and both stakes are \
+                         returned in full. Lying costs you: the loser's Keptvow score drops."
+                    } else {
                         "The two of you reported different outcomes, so this is now with the \
                          operator to review. If nobody reviews it in time it voids and both \
-                         stakes are returned in full. Nobody wins an argument here.",
-                    ),
+                         stakes are returned in full. Nobody wins an argument here."
+                    }),
                 ),
             ]),
         ),
@@ -2264,15 +2270,15 @@ pub fn dispute_outcome(state: &AppState, req: &Request, market_id: &str) -> Resp
             ApiError::new("MISSING_FIELD", "reason is required to dispute a proposal"),
         );
     }
-    // Optional: which outcome the disputer says is actually right. Passed to Agenttrust as their
+    // Optional: which outcome the disputer says is actually right. Passed to Keptvow as their
     // side of the argument; without it they argue the market can't be determined (void).
     let claimed = parsed.get("outcome").and_then(crate::json::Json::as_f64).map(|o| o.max(0.0) as usize);
     match state.dispute_outcome(market_id, &agent_id, reason) {
         Ok(()) => {
-            let referee = state.agenttrust.resolves_disputes();
+            let referee = state.keptvow.resolves_disputes();
             if referee {
                 state
-                    .agenttrust
+                    .keptvow
                     .pending
                     .lock()
                     .unwrap()
@@ -2285,11 +2291,11 @@ pub fn dispute_outcome(state: &AppState, req: &Request, market_id: &str) -> Resp
                 ("market_id", Json::str(market_id)),
                 ("status", Json::str("Disputed")),
                 ("disputed_by", Json::str(agent_id)),
-                ("resolver", Json::str(if referee { "agenttrust" } else { "operator" })),
+                ("resolver", Json::str(if referee { "keptvow" } else { "operator" })),
                 (
                     "note",
                     Json::str(if referee {
-                        "Payout is frozen. The dispute goes to Agenttrust, an independent referee: \
+                        "Payout is frozen. The dispute goes to Keptvow, an independent referee: \
                          its verdict is paid out, and if it can't decide the market voids and \
                          everyone is refunded."
                     } else {
@@ -3693,14 +3699,14 @@ pub fn get_spec(state: &AppState, req: &Request) -> Response {
                        "The crowd's consensus per market. Aggregates only — no identities, ever. A subscriber key gets it live and calibration-weighted.",
                        none(), "markets[] with consensus, track_record"),
                     ep("POST", "/v1/markets/{id}/dispute", "signed",
-                       "Challenge a proposed outcome. Requires a stake in that market. Freezes the payout; Agenttrust, an independent referee, decides.",
+                       "Challenge a proposed outcome. Requires a stake in that market. Freezes the payout; Keptvow, an independent referee, decides.",
                        Json::obj(vec![
                            ("reason", Json::str("string, required")),
                            ("outcome", Json::str("index you say is right, optional; omitted means 'can't be determined'")),
                        ]),
                        "confirmation that the payout is frozen, and who resolves it"),
-                    ep("GET", "/v1/agents/{id}/agenttrust", "none",
-                       "An agent's public Agenttrust trust score (0-1000) and level.",
+                    ep("GET", "/v1/agents/{id}/keptvow", "none",
+                       "An agent's public Keptvow trust score (0-1000) and level.",
                        none(), "score, trust_level, profile_url"),
                     ep("GET", "/v1/reserves", "none",
                        "Whether redeemable balances are fully backed. Arithmetic, not a promise.",
@@ -3843,8 +3849,8 @@ pub fn index(state: &AppState) -> Response {
                     ep("POST", "/v1/markets/{id}/stakes", "signed", "Back an outcome with points — no counterparty needed. Add \"dry_run\": true to run every check and commit nothing."),
                     ep("POST", "/v1/markets", "signed", "Open your own market with machine-checkable terms"),
                     ep("POST", "/v1/markets/{id}/propose", "signed", "Propose the outcome, starting the dispute window"),
-                    ep("POST", "/v1/markets/{id}/dispute", "signed", "Challenge a proposed outcome; Agenttrust referees it"),
-                    ep("GET", "/v1/agents/{id}/agenttrust", "none", "An agent's public Agenttrust trust score"),
+                    ep("POST", "/v1/markets/{id}/dispute", "signed", "Challenge a proposed outcome; Keptvow referees it"),
+                    ep("GET", "/v1/agents/{id}/keptvow", "none", "An agent's public Keptvow trust score"),
                     ep("POST", "/v1/markets/{id}/finalize", "signed", "Pay out once the window has elapsed"),
                     ep("POST", "/v1/challenges", "signed", "Offer a head-to-head bet and put your money up — live only once someone takes the other side"),
                     ep("GET", "/v1/challenges", "none", "Bets waiting for someone to take the other side"),
@@ -4487,18 +4493,18 @@ fn generate_id() -> String {
     crate::privacy::random_id("")
 }
 
-/// `GET /v1/agents/{id}/agenttrust` — the agent's public Agenttrust trust score. No auth: the
-/// score is public on Agenttrust already, and showing it is the point.
+/// `GET /v1/agents/{id}/keptvow` — the agent's public Keptvow trust score. No auth: the
+/// score is public on Keptvow already, and showing it is the point.
 ///
 /// Each uncached lookup costs a subprocess and an outbound call, so this is bounded three ways:
 /// only registered agents are looked up (a made-up id is refused before any work), answers are
 /// cached, and anonymous callers are rate-limited per IP.
-pub fn get_agenttrust(state: &AppState, req: &Request, agent_id: &str) -> Response {
-    let at = &state.agenttrust;
+pub fn get_keptvow(state: &AppState, req: &Request, agent_id: &str) -> Response {
+    let at = &state.keptvow;
     let Some(profile) = at.profile_url(agent_id) else {
         return err_response(
             404,
-            ApiError::new("AGENTTRUST_OFF", "Agenttrust is switched off on this deployment"),
+            ApiError::new("KEPTVOW_OFF", "Keptvow is switched off on this deployment"),
         );
     };
     if state.agent_registry.get_pubkey(agent_id).is_none() {
@@ -4507,8 +4513,8 @@ pub fn get_agenttrust(state: &AppState, req: &Request, agent_id: &str) -> Respon
     let now = now_ms();
     if !state.rate_limit_disabled
         && !state.ip_limiter.allow(
-            &format!("agenttrust:{}", req.client_ip()),
-            AGENTTRUST_REQUESTS_PER_SEC,
+            &format!("keptvow:{}", req.client_ip()),
+            KEPTVOW_REQUESTS_PER_SEC,
             now,
         )
     {
@@ -4522,7 +4528,7 @@ pub fn get_agenttrust(state: &AppState, req: &Request, agent_id: &str) -> Respon
         200,
         &Json::obj(vec![
             ("agent_id", Json::str(agent_id)),
-            ("agenttrust_id", Json::str(at.agenttrust_id(agent_id))),
+            ("keptvow_id", Json::str(at.keptvow_id(agent_id))),
             ("reachable", Json::Bool(view.is_some())),
             (
                 "score",
@@ -4536,7 +4542,7 @@ pub fn get_agenttrust(state: &AppState, req: &Request, agent_id: &str) -> Respon
                     .unwrap_or(Json::Null),
             ),
             ("profile_url", Json::str(profile)),
-            ("scale", Json::str("0-1000 from Agenttrust; every new agent starts at 100")),
+            ("scale", Json::str("0-1000 from Keptvow; every new agent starts at 100")),
         ]),
     )
 }

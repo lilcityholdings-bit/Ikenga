@@ -131,7 +131,7 @@ pub enum Record {
     },
     /// A proposal was challenged. Payout stays frozen until it is re-proposed or voided.
     MarketDisputed { market_id: String, agent_id: String, reason: String, disputed_at_ms: i64 },
-    /// A dispute was handed to Agenttrust; its verdict on this agreement settles the market.
+    /// A dispute was handed to Keptvow; its verdict on this agreement settles the market.
     MarketReferred { market_id: String, agreement_id: String },
     /// A head-to-head offer was posted and the proposer's stake taken.
     ChallengeOpened { challenge_id: String, proposer: String, asset: String, stake: f64 },
@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agenttrust_referral_survives_the_log() {
+    fn an_keptvow_referral_survives_the_log() {
         let rec = Record::MarketReferred { market_id: "m1".into(), agreement_id: "agr_9".into() };
         let parsed = crate::json::parse(rec.to_line().trim()).unwrap();
         match Record::from_json(&parsed) {

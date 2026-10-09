@@ -55,11 +55,12 @@ not yet reachable by anyone outside whatever host it runs on:
 | `IKENGA_OWNER_KEY` | auto-generated per boot | Required in production. Guards `/v1/treasury`, `/v1/compliance/*`, `/dev/faucet/*`. |
 | `IKENGA_WAL_PATH` | `data/ikenga.wal` | Where the write-ahead log lives. `off` only allowed outside production. |
 | `IKENGA_WAL_SYNC` | `always` | `always` (fsync every record, safest), `interval` (batched, can lose ~200ms on a crash), `never` (load-testing only — see `src/wal.rs`). |
-| `AGENTTRUST_URL` | the live Agenttrust service | Where trust scores and dispute rulings come from. `off` disables both. |
-| `AGENTTRUST_API_KEY` | unset | An Agenttrust platform key (create one on Agenttrust's `/admin` page). Without it trust scores still show, but disputes stay with the operator. |
-| `AGENTTRUST_ARBITER` | unset | Optional: an Agenttrust id to decide disputes, instead of a drawn jury. Useful while Agenttrust's jury pool is small. |
-| `AGENTTRUST_SECRET` | the owner key | Key for agents' pseudonymous Agenttrust ids and secrets. Keep it stable (changing it, or the owner key when this is unset, gives every agent a new, empty Agenttrust identity) and secret (it would link pseudonyms back to agents). |
-| — | — | `AGENTTRUST_URL` must be `https://` (plain HTTP only to localhost); anything else disables Agenttrust. |
+| `KEPTVOW_URL` | `https://keptvow.com` | Where trust scores, bet records and dispute rulings go. `off` disables all three. |
+| `KEPTVOW_API_KEY` | unset | Optional Keptvow platform key (issue one on Keptvow's `/admin` page). Not needed: Keptvow's free tier allows 120 writes an hour from one address, about 30 bets or 40 disputes. A key lifts that limit and makes Ikenga's deals count toward bots' "good"/"excellent" levels. |
+| `KEPTVOW_ARBITER` | unset | Optional: a Keptvow id to decide disputes, instead of a drawn jury. Useful while Keptvow's jury pool is small. |
+| `KEPTVOW_SECRET` | the owner key | Key for agents' pseudonymous Keptvow ids and secrets. Keep it stable (changing it, or the owner key when this is unset, gives every agent a new, empty Keptvow identity) and secret (it would link pseudonyms back to agents). |
+| — | — | `KEPTVOW_URL` must be `https://` (plain HTTP only to localhost); anything else disables Keptvow. The old `AGENTTRUST_*` names still work. |
+| `IKENGA_KEPTVOW_TICK_MS` / `IKENGA_KEPTVOW_POLL_MS` | 10000 / 120000 | How often the referee thread runs, and how often it re-checks a pending ruling. Only tests should change these. |
 | `IKENGA_STARTER_MARKETS` | on | `off` skips opening the five starter AI/agent-news markets. |
 | `IKENGA_ENABLE_ORDERBOOK` | unset (off) | Set `1` to turn on the custodial BTC-USD/ETH-USD/SOL-USD order book. Off by default because pari-mutuel markets need no counterparty and are what a fresh deployment can run on day one. |
 

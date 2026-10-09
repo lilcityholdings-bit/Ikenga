@@ -149,8 +149,8 @@ pub struct AppState {
     /// durable yet (see the routing section of docs/CUSTODY.md).
     pub route_calls: Mutex<HashMap<String, u64>>,
     /// The outside referee for disputed markets and the source of the public trust score shown
-    /// beside each agent. See `agenttrust.rs`.
-    pub agenttrust: crate::agenttrust::AgentTrust,
+    /// beside each agent. See `keptvow.rs`.
+    pub keptvow: crate::keptvow::Keptvow,
 }
 
 /// The identity the venue's own seed liquidity is booked against.
@@ -194,7 +194,7 @@ impl AppState {
             .and_then(|s| crate::crypto::hex_decode(&s))
             .filter(|b| !b.is_empty())
             .unwrap_or_else(|| crate::crypto::secure_random_bytes(32));
-        let agenttrust = crate::agenttrust::AgentTrust::from_env(&owner_key);
+        let keptvow = crate::keptvow::Keptvow::from_env(&owner_key);
         Self {
             books,
             balances: Mutex::new(HashMap::new()),
@@ -235,7 +235,7 @@ impl AppState {
             reserves: Mutex::new(HashMap::new()),
             withdrawals: Mutex::new(Vec::new()),
             route_calls: Mutex::new(HashMap::new()),
-            agenttrust,
+            keptvow,
         }
     }
 
@@ -383,7 +383,7 @@ impl AppState {
                 Record::MarketProposed {
                     market_id, outcome, proposed_at_ms, evidence, automatic,
                 } => {
-                    self.agenttrust.referrals.lock().unwrap().remove(&market_id);
+                    self.keptvow.referrals.lock().unwrap().remove(&market_id);
                     if let Some(m) = self.markets.lock().unwrap().get_mut(&market_id) {
                         m.proposal = Some(crate::prediction::Proposal {
                             outcome: outcome.map(|o| o as usize),
@@ -467,13 +467,13 @@ impl AppState {
                     // Checked on the way back in too: this id came from another service, and it
                     // ends up in a URL. A bad one is dropped and the dispute stays with the
                     // operator (and the 24-hour backstop).
-                    if !crate::agenttrust::is_safe_id(&agreement_id) {
-                        eprintln!("WAL: ignoring malformed Agenttrust agreement id for {market_id}");
+                    if !crate::keptvow::is_safe_id(&agreement_id) {
+                        eprintln!("WAL: ignoring malformed Keptvow agreement id for {market_id}");
                         continue;
                     }
-                    self.agenttrust.referrals.lock().unwrap().insert(
+                    self.keptvow.referrals.lock().unwrap().insert(
                         market_id,
-                        crate::agenttrust::Referral { agreement_id, last_polled_ms: 0 },
+                        crate::keptvow::Referral { agreement_id, last_polled_ms: 0 },
                     );
                 }
                 Record::StakePlaced { market_id, agent_id, outcome_idx, amount, placed_at_ms } => {
@@ -898,7 +898,7 @@ impl AppState {
             return Err("only the two sides of this bet can report its outcome");
         }
 
-        let (agreed, waiting_on, conflict) = {
+        let (agreed, waiting_on, conflict, both_sides) = {
             let mut reports = self.outcome_reports.lock().unwrap();
             let entry = reports.entry(market_id.to_string()).or_default();
             // First answer stands. Letting someone revise turns "we agreed" into a race, where
@@ -910,8 +910,24 @@ impl AppState {
             let values: Vec<usize> = participants.iter().filter_map(|a| entry.get(a).copied()).collect();
             let all_in = values.len() == participants.len() && participants.len() >= 2;
             let same = values.windows(2).all(|w| w[0] == w[1]);
-            (all_in && same, participants.len().saturating_sub(values.len()), all_in && !same)
+            let both_sides = match (all_in, participants.as_slice()) {
+                (true, [a, b]) => Some(((a.clone(), entry[a]), (b.clone(), entry[b]))),
+                _ => None,
+            };
+            (all_in && same, participants.len().saturating_sub(values.len()), all_in && !same, both_sides)
         };
+
+        // Both answers are in: put the bet on both bots' Keptvow records. The referee thread
+        // sends it (no network calls on this path); a disagreement it sends becomes the market's
+        // referral, so Keptvow's arbiter or jury decides instead of waiting on the operator.
+        if let (Some((a, b)), true) = (both_sides, self.keptvow.resolves_disputes()) {
+            self.keptvow.bets.lock().unwrap().push(crate::keptvow::BetRecord {
+                market_id: market_id.to_string(),
+                a,
+                b,
+                attempts: 0,
+            });
+        }
 
         if agreed {
             self.resolve_market(market_id, Some(outcome));
@@ -1191,8 +1207,8 @@ impl AppState {
         // the ordinary dispute window runs again on the new outcome.
         market.disputed_at_ms = None;
         drop(markets);
-        // A fresh proposal answers any dispute that was out with Agenttrust.
-        self.agenttrust.referrals.lock().unwrap().remove(market_id);
+        // A fresh proposal answers any dispute that was out with Keptvow.
+        self.keptvow.referrals.lock().unwrap().remove(market_id);
         self.events.record(
             crate::events::EventKind::OutcomeProposed,
             market_id,

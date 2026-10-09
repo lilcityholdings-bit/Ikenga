@@ -1,4 +1,4 @@
-mod agenttrust;
+mod keptvow;
 mod api;
 mod auth;
 mod bench;
@@ -244,7 +244,7 @@ fn main() {
     // stop before it redeploys, so this is the normal shutdown path, not an edge case.
     install_shutdown_handler(Arc::clone(&state));
     install_settlement_sweeper(Arc::clone(&state));
-    install_agenttrust_referee(Arc::clone(&state));
+    install_keptvow_referee(Arc::clone(&state));
 
     // One thread per *connection*, with keep-alive, and a hard cap on how many at once.
     //
@@ -477,7 +477,10 @@ fn route(state: &Arc<AppState>, req: &http::Request) -> http::Response {
         ("GET", ["v1", "fees"]) => api::get_fee_schedule(&state, &req),
         ("GET", ["v1", "route"]) => api::get_route(&state, &req),
         ("POST", ["v1", "agents"]) => api::register_agent(&state, &req),
-        ("GET", ["v1", "agents", agent_id, "agenttrust"]) => api::get_agenttrust(&state, &req, agent_id),
+        // The old name still answers, for anything built before the rename.
+        ("GET", ["v1", "agents", agent_id, "keptvow" | "agenttrust"]) => {
+            api::get_keptvow(&state, &req, agent_id)
+        }
         ("GET", ["v1", "markets"]) => api::list_markets(&state, &req),
         ("POST", ["v1", "markets"]) => api::create_market(&state, &req),
         ("GET", ["v1", "markets", market_id]) => api::get_market(&state, &req, market_id),
@@ -1042,25 +1045,40 @@ fn install_shutdown_handler(state: Arc<AppState>) {
     });
 }
 
-/// Sends disputed markets to Agenttrust and applies its verdicts. See `agenttrust.rs`.
+/// Sends disputed markets to Keptvow and applies its verdicts. See `keptvow.rs`.
 ///
 /// Its own thread, not part of the settlement sweeper, because every step here is a network call
 /// to another service and settlement must never wait on one. Whatever happens here, the
 /// sweeper's 24-hour review backstop still voids and refunds a dispute nobody decided.
-fn install_agenttrust_referee(state: Arc<AppState>) {
-    if !state.agenttrust.resolves_disputes() {
+fn install_keptvow_referee(state: Arc<AppState>) {
+    if !state.keptvow.resolves_disputes() {
         return;
     }
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(10));
-        agenttrust_tick(&state, api::now_ms_pub());
+        thread::sleep(Duration::from_millis(keptvow_tick_ms()));
+        keptvow_tick(&state, api::now_ms_pub());
     });
 }
 
-fn agenttrust_tick(state: &AppState, now: i64) {
-    let at = &state.agenttrust;
+/// How often the referee thread runs, and how long it waits between two checks of the same
+/// pending ruling. Overridable (`IKENGA_KEPTVOW_TICK_MS`, `IKENGA_KEPTVOW_POLL_MS`) so tests
+/// don't sit through the production pace.
+fn keptvow_tick_ms() -> u64 {
+    std::env::var("IKENGA_KEPTVOW_TICK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000).max(250)
+}
 
-    // 1. New disputes -> open an Agenttrust agreement.
+fn keptvow_poll_ms() -> i64 {
+    std::env::var("IKENGA_KEPTVOW_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(keptvow::POLL_EVERY_MS)
+        .max(1_000)
+}
+
+fn keptvow_tick(state: &AppState, now: i64) {
+    let at = &state.keptvow;
+
+    // 1. New disputes -> open a Keptvow agreement.
     let pending: Vec<(String, (String, Option<usize>, String))> =
         at.pending.lock().unwrap().drain().collect();
     for (market_id, (disputer, claimed, reason)) in pending {
@@ -1089,34 +1107,86 @@ fn agenttrust_tick(state: &AppState, now: i64) {
             &market_id, &question, &outcomes, pool, proposed, &evidence, &disputer, claimed, &reason,
         ) {
             Ok(agreement_id) => {
-                println!("agenttrust: {market_id} dispute sent to Agenttrust as {agreement_id}");
+                println!("keptvow: {market_id} dispute sent to Keptvow as {agreement_id}");
                 state.wal.append(&[wal::Record::MarketReferred {
                     market_id: market_id.clone(),
                     agreement_id: agreement_id.clone(),
                 }]);
                 at.referrals.lock().unwrap().insert(
                     market_id,
-                    agenttrust::Referral { agreement_id, last_polled_ms: now },
+                    keptvow::Referral { agreement_id, last_polled_ms: now },
                 );
             }
             Err(e) => {
-                eprintln!("agenttrust: could not refer {market_id}: {e}");
+                eprintln!("keptvow: could not refer {market_id}: {e}");
                 // A network blip is worth another try; a refusal (bad key etc.) is not — the
                 // dispute stays with the operator as it always did.
-                if e.contains("could not be reached") {
+                if e.contains(keptvow::RETRY_MARKER) {
                     at.pending.lock().unwrap().entry(market_id).or_insert((disputer, claimed, reason));
                 }
             }
         }
     }
 
-    // 2. Open referrals -> check for a verdict and apply it.
+    // 2. Head-to-head bets with both answers in -> record them on Keptvow.
+    let bets: Vec<keptvow::BetRecord> = at.bets.lock().unwrap().drain(..).collect();
+    for mut bet in bets {
+        let details = {
+            let markets = state.markets.lock().unwrap();
+            markets.get(&bet.market_id).map(|m| {
+                (m.question.clone(), m.outcomes.clone(), m.status == prediction::MarketStatus::Disputed)
+            })
+        };
+        let Some((question, outcomes, disputed)) = details else { continue };
+        let pool: f64 = state
+            .stakes
+            .lock()
+            .unwrap()
+            .get(&bet.market_id)
+            .map(|v| v.iter().map(|s| s.amount).sum())
+            .unwrap_or(0.0);
+        match at.record_bet(
+            &bet.market_id,
+            &question,
+            &outcomes,
+            pool,
+            (&bet.a.0, bet.a.1),
+            (&bet.b.0, bet.b.1),
+        ) {
+            Ok(agreement_id) => {
+                let disagreed = bet.a.1 != bet.b.1;
+                println!(
+                    "keptvow: bet {} recorded as {agreement_id} ({})",
+                    bet.market_id,
+                    if disagreed { "sides disagree — Keptvow decides" } else { "both sides agree" }
+                );
+                // A disagreement is still frozen here: Keptvow's ruling settles it.
+                if disagreed && disputed && !at.referrals.lock().unwrap().contains_key(&bet.market_id) {
+                    state.wal.append(&[wal::Record::MarketReferred {
+                        market_id: bet.market_id.clone(),
+                        agreement_id: agreement_id.clone(),
+                    }]);
+                    at.referrals.lock().unwrap().insert(
+                        bet.market_id.clone(),
+                        keptvow::Referral { agreement_id, last_polled_ms: now },
+                    );
+                }
+            }
+            Err(e) if e.contains(keptvow::RETRY_MARKER) && bet.attempts < keptvow::MAX_BET_ATTEMPTS => {
+                bet.attempts += 1;
+                at.bets.lock().unwrap().push(bet);
+            }
+            Err(e) => eprintln!("keptvow: could not record bet {}: {e}", bet.market_id),
+        }
+    }
+
+    // 3. Open referrals -> check for a verdict and apply it.
     let due: Vec<(String, String)> = at
         .referrals
         .lock()
         .unwrap()
         .iter_mut()
-        .filter(|(_, r)| now - r.last_polled_ms >= agenttrust::POLL_EVERY_MS)
+        .filter(|(_, r)| now - r.last_polled_ms >= keptvow_poll_ms())
         .map(|(m, r)| {
             r.last_polled_ms = now;
             (m.clone(), r.agreement_id.clone())
@@ -1136,23 +1206,23 @@ fn agenttrust_tick(state: &AppState, now: i64) {
             continue;
         };
         match at.verdict(&agreement_id, outcome_count) {
-            Some(agenttrust::Verdict::Outcome(k)) => {
-                let evidence = format!("Agenttrust agreement {agreement_id} ruled outcome {k}");
+            Some(keptvow::Verdict::Outcome(k)) => {
+                let evidence = format!("Keptvow agreement {agreement_id} ruled outcome {k}");
                 if let Err(e) = state.propose_outcome(&market_id, Some(k), evidence, true, now) {
-                    eprintln!("agenttrust: could not apply verdict on {market_id}: {e}");
+                    eprintln!("keptvow: could not apply verdict on {market_id}: {e}");
                     continue;
                 }
                 if state.resolve_market(&market_id, Some(k)).is_some() {
-                    println!("agenttrust: {market_id} settled on outcome {k} by {agreement_id}");
+                    println!("keptvow: {market_id} settled on outcome {k} by {agreement_id}");
                 }
             }
-            Some(agenttrust::Verdict::Void) => {
+            Some(keptvow::Verdict::Void) => {
                 at.referrals.lock().unwrap().remove(&market_id);
                 if state.resolve_market(&market_id, None).is_some() {
-                    println!("agenttrust: {market_id} voided by {agreement_id}; every stake refunded");
+                    println!("keptvow: {market_id} voided by {agreement_id}; every stake refunded");
                 }
             }
-            Some(agenttrust::Verdict::Wait) | None => {}
+            Some(keptvow::Verdict::Wait) | None => {}
         }
     }
 }

@@ -169,7 +169,7 @@ def start_server():
         "IKENGA_AUTOPILOT_INTERVAL_MS": "2000",
         "IKENGA_SWEEP_INTERVAL_MS": "1000",
         # This suite is about what autopilot does on an empty venue, so it starts without the
-        # five starter markets (src/starter.rs, covered by agenttrust_test.py and unit tests).
+        # five starter markets (src/starter.rs, covered by keptvow_test.py and unit tests).
         "IKENGA_STARTER_MARKETS": "off",
     }
     proc = subprocess.Popen(BIN, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
