@@ -1,0 +1,269 @@
+{
+ "collected_at": 1792557162,
+ "rpc": "public",
+ "apps": [
+  {
+   "app": "Axiom",
+   "trades": 118,
+   "volume_sol": 86.92747569000004,
+   "median_trade_sol": 0.2393825635,
+   "cost_per_100": {
+    "app_fee": 0.9026070684464389,
+    "network_fee": 0.011268598244969933,
+    "tips": 0.0001646637025449323,
+    "total": 0.9140403303939537
+   },
+   "typical_trade_cost_pct": 1.001378286347171,
+   "worst_10pct_trade_cost_pct": 1.2649520183929828,
+   "window": [
+    1792556467,
+    1792556482
+   ],
+   "examples": [
+    "2j8DKEHQ75mCHxUC7uxMxS91aC5YS9if1BYyBNrqhBxdL8rfUCF8nQuvMMajoAsfBNxc2bMfRYiRVBwWAKT4vJXR",
+    "52DiKkH6QThYWV1a9jzTsqJ3CjCxVUgjGq7tPQrpETR2QRWcDJdtG75MTVzDwnJvE6xNHVwbmorT1xCBtyNvWGo3",
+    "24wNDEgeuAeYdzQuo5ckwsesvLkM4mGmv7BcVin84VEddmQAjs99mUtwUyiKDE5aSCsnMR1dLjeBbTxGjt7TFnLT",
+    "435ezitYk3y27FVVQXdufQu8W8rTWkExahpEx5fo8M4zsUacM5YbuWDcm7MGSyruVyepkfJUcH38YpaHMJoHfEQL",
+    "52xHHqeZYcNE8ufc1n2s9KNcqT3DKaKJZG6UmfhAmeRWz6WxRU7zyBVwhU26jZezQygHpd61jrECdMZqd2yXiV7t"
+   ],
+   "skipped": {
+    "not priced in SOL (more than one token moved)": 1,
+    "no SOL leg (token-to-token or housekeeping)": 1
+   },
+   "note": "Axiom sends most landing tips to eight accounts of its own, and only one is published, so its tip cost is mostly not counted."
+  },
+  {
+   "app": "Maestro",
+   "trades": 52,
+   "volume_sol": 41.30020058999999,
+   "median_trade_sol": 0.367743496,
+   "cost_per_100": {
+    "app_fee": 0.999473826042258,
+    "network_fee": 0.0006295368939756533,
+    "tips": 0.0,
+    "total": 1.000103362936233
+   },
+   "typical_trade_cost_pct": 0.9993760592259371,
+   "worst_10pct_trade_cost_pct": 1.019715502714955,
+   "window": [
+    1792555806,
+    1792556751
+   ],
+   "examples": [
+    "66uZm7D2RQgisK6a1vJmZdoKbaXmtDNKojK3XbzoZGQWtyRQ7ak6X4t3Ex5MDLWkjQ3HHJ19zmGbMuDcVJynNWMJ",
+    "5jZv1mJN6SD3hrQ2vD8jhjCjp8Y45xjfqaw43LzFwmWh51JdiB2BjjC8xGqZ9K91W5EfHTBbRwAzgxvcaM9NKaWj",
+    "6K2QLXU2mjFLoJ63m3aGXP9UpR2bcgCtgHDNFU4yfVWXJ5Yn3AyA5QUSjNZDKkAv7VS3kk63R5CA7BxpcG5nR8o",
+    "52LNgew7HUa5BWm4MK4wyMQM5tUBT4eJAUmBVnF2WoTPQ3Xfm3MMxaGUQpo8NYasd32XfjjmZ5pSp3B1GpHVQ3Ye",
+    "eYB8Xu6sWGnhrjDV8rrAbgRZFppZNszWefDgxiePWWepMoVYutdDs7cs3FK2LvDCvAYBj6Sc3YJMQSwruk7wx5z"
+   ],
+   "skipped": {
+    "app fee not paid in SOL": 17,
+    "no token swap by a signer": 4,
+    "older than 7 days (retired fee wallet)": 45,
+    "no SOL leg (token-to-token or housekeeping)": 2
+   },
+   "note": null
+  },
+  {
+   "app": "Photon",
+   "trades": 107,
+   "volume_sol": 68.02006457200001,
+   "median_trade_sol": 0.283340116,
+   "cost_per_100": {
+    "app_fee": 0.9577642495625815,
+    "network_fee": 0.11017519532148322,
+    "tips": 0.0066679824968396695,
+    "total": 1.0746074273809056
+   },
+   "typical_trade_cost_pct": 1.0933420792154238,
+   "worst_10pct_trade_cost_pct": 1.7901576141095064,
+   "window": [
+    1792555875,
+    1792556517
+   ],
+   "examples": [
+    "HFksd4i1ojuMX6MupCmXUMLEtCTFLiB7aGqgnbWTDube4QZ3uJYQVWebkc7RKiV8FfkBe3bEzwRFK1eEqomn4MF",
+    "4zPg3oqRSWSxMk3DBgJjSxq7wuBYGwRLKCgwRHx3dTVAtdNvUHEohC1Vzaoi4KrbecfAHaMx11KKp9SPx6Fc1YmB",
+    "2o3zLEPuuSeSfhd4JyMzDpgCe2rj2qy83hbsGBbtBdh3jp8GsuRtEZbRxSUFC2bhmVTD4aYZN6xjCfGoCGQFxQWi",
+    "3aC87ZgfWDyE2D3GcfmggBBWP2j68xPZMk9BPvModZQDtshmuRf3PSQFZVZ9kUDWQpLmTsQ1XpMZEzwGZyfiGWKw",
+    "3t3oNeNBSSH9qQZX2vVJoQGsboCifvjhntPko15iNVrrJSy7YDaDTcaDxAX34mCEMuGiY52nV8q3Ht7L9cch3WM4"
+   ],
+   "skipped": {
+    "no SOL leg (token-to-token or housekeeping)": 2,
+    "not priced in SOL (more than one token moved)": 3,
+    "no token swap by a signer": 6
+   },
+   "note": null
+  },
+  {
+   "app": "GMGN",
+   "trades": 111,
+   "volume_sol": 47.25877953799999,
+   "median_trade_sol": 0.188,
+   "cost_per_100": {
+    "app_fee": 1.006875754413817,
+    "network_fee": 0.12148650803357115,
+    "tips": 0.00019236425673435263,
+    "total": 1.1285546267041224
+   },
+   "typical_trade_cost_pct": 1.082950363191005,
+   "worst_10pct_trade_cost_pct": 1.8636363636363638,
+   "window": [
+    1792556583,
+    1792556625
+   ],
+   "examples": [
+    "4mcKR4os7Pv5pDuwZ13zUsZohHy6B9Dc9kfSr4jirGyQHoZXq35YNMXuH4GCcaQBxATShqC3RnfVRJeS3EKYxgxF",
+    "5cyFczyb4Mxk9M8xyELjPC1WB5ETiWiJGQMCJ3m6evLMemh3Xm87zzq3cM2NHX4Ceoy19yVGDJsUzUqb8Mgr47tt",
+    "3zo1Cf3W5NPNGQjtnjKfHmGxAGYWr4XF9DoGVF94FrBVvA37fNnsLvkfSvhF42LeDJeeRfnraqWMBgfPZdrwCgbe",
+    "125SXHYgtUycwV3ST84YpCzmm5VhuWk69iPSAMTZaXqwYgWcg8HRzMT1z8aFxNxz6k7AB4qMh2HJynj4TjmUYLSg",
+    "5pUrgQTAdqpg43UYfRcAhWPf1NVW8zZdGrekfFAGZtbcCEzn4Rf5UWfCPGFgzZe2jyWUD8XRaeGcYSpQjtvZSP1c"
+   ],
+   "skipped": {
+    "not priced in SOL (more than one token moved)": 1,
+    "no SOL leg (token-to-token or housekeeping)": 7,
+    "no token swap by a signer": 1
+   },
+   "note": null
+  },
+  {
+   "app": "Trojan",
+   "trades": 61,
+   "volume_sol": 26.551676324,
+   "median_trade_sol": 0.102750003,
+   "cost_per_100": {
+    "app_fee": 1.0016642706645253,
+    "network_fee": 0.21600919015481437,
+    "tips": 0.0,
+    "total": 1.21767346081934
+   },
+   "typical_trade_cost_pct": 1.5749209111115843,
+   "worst_10pct_trade_cost_pct": 3.8134749068402374,
+   "window": [
+    1792556084,
+    1792556668
+   ],
+   "examples": [
+    "2fEXnxYtLXHtCTHG2fEuDDwvNw5PA7vzJNcDr9xfw64GqLU7wf1bgwo6vQZKau79qAJ82yEmYZfg8CMdUJqFZn1P",
+    "3Vj9NvM4cKA7Gvvmune6nBjKuhmxBwzSxzewsVRDhiDP9pW4TGX65tMSDUdptLxKWoiZxmewzew4qSjqr9YAnaz1",
+    "2nS4TizX3Kz3rMcUxRFMsbsPDNB9iSxPs34e3KbYaD7VN1vHE9tyGG2pZncEMM9FcKNF5B5ASMyp8ShXMCydno7r",
+    "4QZzauN51L9NX64XJsyixW6e8Ab2im6xd6HurkJdfQfHFFbx5HJrVpVdCdYQMmLiw36U6TF4rCyfxTfDDfv7n5eM",
+    "6zefsgTtFeMwDgDcrWFA2joMJBikQR3A9FRi48d7eVRPauxAUG1MywkQXF1JiC1UMv48qF8RMz9c7GxaincLt4h"
+   ],
+   "skipped": {
+    "not priced in SOL (more than one token moved)": 4,
+    "no SOL leg (token-to-token or housekeeping)": 2,
+    "no token swap by a signer": 53
+   },
+   "note": null
+  },
+  {
+   "app": "BonkBot",
+   "trades": 80,
+   "volume_sol": 51.123320361,
+   "median_trade_sol": 0.495,
+   "cost_per_100": {
+    "app_fee": 1.008937182400785,
+    "network_fee": 0.32219347029277784,
+    "tips": 0.0,
+    "total": 1.331130652693562
+   },
+   "typical_trade_cost_pct": 1.4935064935064934,
+   "worst_10pct_trade_cost_pct": 3.04040404040404,
+   "window": [
+    1792553901,
+    1792556665
+   ],
+   "examples": [
+    "3aeRDLEh4mbed9ZuE2FzNPe6qzTPvRcDDkjFBZc3UQhTtxRYxm38CsGhqpEh2efTZwPQbAA8H9dbNq238mNwvazn",
+    "4j4faom7TLqCNF4MoN6eWbRgRQT9id3x2KMMqBfemnCMPg11enTLAZfVacQQ6g36tPF7cy2V6WU5oF1JnXLeGNC9",
+    "WmL82oUsJpaBG9s8yAakwM7BT2M1KQtdKTYVdJ6aoMpoFftUYgqWkuF4B5mQKHymTPzKVBuX6GLqHhdJFYC7UFA",
+    "3pwAq5vKyJ8JQFw7kHR2SyEVVjP7cvno13Zm1xEbqMHEpPQBJTuKyoKBiRxG5nAJZMwA5LjifdMtjd5qJnRrxESi",
+    "mkiUKRZ3DvbgfgTHzgKErxripqTEnFZQs44u44YifCHLPKs7ULqbh5tjSvugtVHpAHkXhC1KoQiZdWsLfAGUeYA"
+   ],
+   "skipped": {
+    "app fee not paid in SOL": 32,
+    "not priced in SOL (more than one token moved)": 3,
+    "no SOL leg (token-to-token or housekeeping)": 3,
+    "no token swap by a signer": 2
+   },
+   "note": null
+  },
+  {
+   "app": "MevX",
+   "trades": 57,
+   "volume_sol": 10.597784004999998,
+   "median_trade_sol": 0.142789349,
+   "cost_per_100": {
+    "app_fee": 0.9024501155607391,
+    "network_fee": 0.44118657238098713,
+    "tips": 0.056615609425227205,
+    "total": 1.4002522973669533
+   },
+   "typical_trade_cost_pct": 1.5579470198675496,
+   "worst_10pct_trade_cost_pct": 2.9195553574438664,
+   "window": [
+    1792147310,
+    1792556992
+   ],
+   "examples": [
+    "2ZNygWhmb9UHyEVTJozR5nqe33g5pdWKooDStcVe1CFcxU2JUZFLisJQGDYt7rbR1kELhVrG6TvQvfQ1JGFnfULq",
+    "2tBGcstHrGuzXKgDnEVShHGEsAxwGRDo4z3j5q5J75hLRAgiBK5CgkaMBpuFqzCcQUyJAzvDjJ4Toy64J3nz1x3n",
+    "4maYz9eNM1yL2XqLvy67eooyor2scLDJDuJag9TGymmwiqLzbnzP21j9QpX6g5SgSWtEF3GMN7zseR1er8XSKdxa",
+    "KRe9w9Brsp6ZoRXSEaM8sJGnVX5ZYTdt4oCpGG8Bs6LbYrtcVvstFLkRRUrTdchd5c2NWbX91cxK7WCTs7izQcZ",
+    "3ptEDazt26zgTma3GMGRJNJcpt7ZitTcEc9VcRsQ9zHTpJfH3APeVKTXHmQeJwDt5B6wP3dRE2jaffYkQfm7o8zL"
+   ],
+   "skipped": {
+    "older than 7 days (retired fee wallet)": 25,
+    "no SOL leg (token-to-token or housekeeping)": 16,
+    "no token swap by a signer": 22
+   },
+   "note": null
+  },
+  {
+   "app": "Bloom",
+   "trades": 60,
+   "volume_sol": 43.333099266999994,
+   "median_trade_sol": 0.21140721899999998,
+   "cost_per_100": {
+    "app_fee": 0.9971593638792934,
+    "network_fee": 0.7759018064420969,
+    "tips": 0.12576991011927016,
+    "total": 1.898831080440661
+   },
+   "typical_trade_cost_pct": 1.427969348659004,
+   "worst_10pct_trade_cost_pct": 3.8834951456310676,
+   "window": [
+    1792555999,
+    1792556893
+   ],
+   "examples": [
+    "669aicGHcHHVdszte4YizM8L64XBpBQJTWXrpkZyG57HuyBSKAEqSiUkZeXn2A8BwWEvj9w5Zf8F8Lx5K3qRaJiq",
+    "n8skqcvNVWDUY8FWVKgRdQ7oZVcDMRi97qMh67qBmKDzMqpoHEbRnT4976ta5BR2Ne8FTP8R9T9sQ5oYMD5GMex",
+    "5HZjaTGcK7x8KcudM6toTarKXZ9p4gWdimXeZey776ctpLJpYF1j7cT47TfdadH8JxvGdis7BuT64qPZoZff1a25",
+    "uxUWS2jPP7c1TZ5EDpGLwdS6oZ8aF2Aw6W3FECnPSuthQVvTuQCd5sAq3ML6Ujhv4VyNry2Qs6NAzjgKowKyxmn",
+    "4KZLMYewhZXoKo9tTzRc9x8Dh18rKvHwgpEThbQ14Tz9cmDduEwvhp6mjN9fdgYaTZZb8bMKwASSNkDxZ9mULx1V"
+   ],
+   "skipped": {
+    "no SOL leg (token-to-token or housekeeping)": 56,
+    "not priced in SOL (more than one token moved)": 2,
+    "no token swap by a signer": 2
+   },
+   "note": null
+  }
+ ],
+ "unranked": [
+  {
+   "app": "BullX",
+   "reason": "49% of its sampled trades paid its known fee wallets less than 0.05% of the trade, so its fees are probably collected somewhere not yet documented"
+  },
+  {
+   "app": "Banana Gun",
+   "reason": "only 23 priceable trades in the 7 days before collection; at least 30 are needed to rank an app"
+  }
+ ],
+ "not_enough_data": [
+  "Nova",
+  "TradeWiz"
+ ]
+}

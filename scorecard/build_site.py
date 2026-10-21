@@ -52,16 +52,16 @@ header { display: grid; gap: 14px; }
 .meta { display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 .meta b { color: var(--fg); font-weight: 500; }
 .ledger { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 640px; font-variant-numeric: tabular-nums; }
+table { width: 100%; border-collapse: collapse; min-width: 700px; font-variant-numeric: tabular-nums; }
 th { font-family: var(--mono); font-size: 11.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--muted); text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
-td { padding: 14px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+  color: var(--muted); text-align: left; padding: 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 14px 12px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-family: var(--mono); font-size: 13.5px; white-space: nowrap; }
 .rank { font-family: var(--mono); color: var(--muted); width: 28px; }
 .app { font-family: var(--display); font-weight: 700; font-size: 16px; white-space: nowrap; }
 .total { font-family: var(--display); font-weight: 800; font-size: 19px; }
-.bar { display: flex; height: 12px; width: 100%; min-width: 160px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.bar { display: flex; height: 12px; width: 100%; min-width: 120px; background: var(--rule); border-radius: 2px; overflow: hidden; }
 .bar span { display: block; height: 100%; }
 .s-app { background: var(--c-app); } .s-net { background: var(--c-net); } .s-tip { background: var(--c-tip); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
@@ -95,24 +95,30 @@ def render(summary, sources):
         ex = a["examples"][0] if a["examples"] else None
         rows.append(f"""<tr>
 <td class="rank">{i}</td>
-<td class="app">{html.escape(a['app'])}</td>
+<td class="app">{html.escape(a['app'])}{'<sup>*</sup>' if a.get('note') else ''}</td>
 <td class="num total">{c['total']:.2f}</td>
-<td style="width:34%"><div class="bar" role="img" aria-label="app fee {c['app_fee']:.2f}, network fee {c['network_fee']:.2f}, tips {c['tips']:.2f} SOL per 100 SOL">
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee {c['app_fee']:.2f}, network fee {c['network_fee']:.2f}, tips {c['tips']:.2f} SOL per 100 SOL">
 <span class="s-app" style="width:{w(c['app_fee'])}"></span><span class="s-net" style="width:{w(c['network_fee'])}"></span><span class="s-tip" style="width:{w(c['tips'])}"></span></div></td>
 <td class="num">{a['typical_trade_cost_pct']:.2f}%</td>
-<td class="num">{a['median_trade_sol']:.3f}</td>
+<td class="num">{a['median_trade_sol']:.3f} SOL</td>
 <td class="num">{a['trades']}</td>
-<td class="num">{f'<a href="https://solscan.io/tx/{ex}" target="_blank" rel="noopener">check one</a>' if ex else ''}</td>
+<td class="num">{f'<a href="https://solscan.io/tx/{ex}" target="_blank" rel="noopener">a trade</a>' if ex else ''}</td>
 </tr>""")
 
     src_items = []
-    for app in [a["app"] for a in apps] + summary.get("not_enough_data", []):
+    for app in [a["app"] for a in apps] + [u["app"] for u in summary.get("unranked", [])] + summary.get("not_enough_data", []):
         spec = sources["apps"][app]
         links = ", ".join(f'<a href="{html.escape(s.split(" ")[0])}" target="_blank" rel="noopener">{html.escape(s.split("/")[2] if "//" in s else s)}</a>' for s in spec["sources"])
         src_items.append(f"<li><b>{html.escape(app)}</b>: {len(spec['fee_wallets'])} fee wallet(s), from {links}</li>")
     tip_items = "".join(f"<li><b>{html.escape(k)}</b>: {len(v['accounts'])} account(s), {html.escape(v['source'])}</li>"
                         for k, v in sources["tip_accounts"].items())
     missing = summary.get("not_enough_data", [])
+    notes = "".join(f"<p class=\"note\"><sup>*</sup> {html.escape(a['app'])}: {html.escape(a['note'])}</p>"
+                    for a in apps if a.get("note"))
+    unranked = "".join(f"<li><b>{html.escape(u['app'])}</b>: {html.escape(u['reason'])}.</li>"
+                       for u in summary.get("unranked", []))
+    unranked_block = (f'<div style="display:grid;gap:8px"><h2>Not ranked yet</h2><ul class="note">{unranked}'
+                      f'</ul></div>') if unranked else ""
     window = (f"{fmt_time(min(w[0] for w in windows))} to {fmt_time(max(w[1] for w in windows))}"
               if windows else "n/a")
 
@@ -128,10 +134,12 @@ def render(summary, sources):
 <section style="display:grid;gap:14px">
   <div class="legend"><span><i class="s-app"></i>App fee</span><span><i class="s-net"></i>Network fee</span><span><i class="s-tip"></i>Landing tips</span></div>
   <div class="ledger"><table>
-    <thead><tr><th></th><th>App</th><th class="num">SOL per 100 SOL</th><th>Where it goes</th><th class="num">Typical trade</th><th class="num">Median size (SOL)</th><th class="num">Trades</th><th class="num">Verify</th></tr></thead>
+    <thead><tr><th></th><th>App</th><th class="num">SOL per 100 SOL</th><th>Where it goes</th><th class="num">Typical trade</th><th class="num">Median size</th><th class="num">Trades</th><th class="num">Check</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table></div>
   <p class="note"><b>SOL per 100 SOL</b> is the total cost across every trade measured, divided by the total traded. <b>Typical trade</b> is the median single trade's cost as a share of its size. When it is much higher than the first column, the app's users mostly make small trades, where flat network fees and tips weigh heavily.{(' No priceable trades were found for: ' + html.escape(', '.join(missing)) + '.') if missing else ''}</p>
+  {notes}
+  {unranked_block}
 </section>
 
 <section class="split">
@@ -177,6 +185,9 @@ def main():
         sources = json.load(f)
     page = render(summary, sources)
     os.makedirs(SITE, exist_ok=True)
+    # The numbers behind the page, published beside it so anyone can reuse or check them.
+    with open(os.path.join(SITE, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=1)
     with open(os.path.join(SITE, "fragment.html"), "w") as f:
         f.write(page)
     with open(os.path.join(SITE, "index.html"), "w") as f:

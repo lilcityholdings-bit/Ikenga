@@ -3,105 +3,182 @@
   "apps": {
     "Axiom": {
       "fee_wallets": [
-        "7LCZckF6XXGQ1hDY6HFXBKWAtiUgL9QY5vj1C4Bn1Qjj", "4V65jvcDG9DSQioUVqVPiUcUY9v6sb6HKtMnsxSKEz5S",
-        "CeA3sPZfWWToFEBmw5n1Y93tnV66Vmp8LacLzsVprgxZ", "AaG6of1gbj1pbDumvbSiTuJhRCRkkUNaWVxijSbWvTJW",
-        "7oi1L8U9MRu5zDz5syFahsiLUric47LzvJBQX6r827ws", "9kPrgLggBJ69tx1czYAbp7fezuUmL337BsqQTKETUEhP",
-        "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy", "4FobGn5ZWYquoJkxMzh2VUAWvV36xMgxQ3M7uG1pGGhd",
-        "76sxKrPtgoJHDJvxwFHqb3cAXWfRHFLe3VpKcLCAHSEf", "H2cDR3EkJjtTKDQKk8SJS48du9mhsdzQhy8xJx5UMqQK",
-        "8m5GkL7nVy95G4YVUbs79z873oVKqg2afgKRmqxsiiRm", "4kuG6NsAFJNwqEkac8GFDMMheCGKUPEbaRVHHyFHSwWz",
-        "8vFGAKdwpn4hk7kc1cBgfWZzpyW3MEMDATDzVZhddeQb", "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG",
-        "DZfEurFKFtSbdWZsKSDTqpqsQgvXxmESpvRtXkAdgLwM", "5L2QKqDn5ukJSWGyqR4RPvFvwnBabKWqAqMzH4heaQNB",
-        "DYVeNgXGLAhZdeLMMYnCw1nPnMxkBN7fJnNpHmizTrrF", "Hbj6XdxX6eV4nfbYTseysibp4zZJtVRRPn2J3BhGRuK9",
-        "846ah7iBSu9ApuCyEhA5xpnjHHX7d4QJKetWLbwzmJZ8", "5BqYhuD4q1YD3DMAYkc1FeTu9vqQVYYdfBAmkZjamyZg",
+        "7LCZckF6XXGQ1hDY6HFXBKWAtiUgL9QY5vj1C4Bn1Qjj",
+        "4V65jvcDG9DSQioUVqVPiUcUY9v6sb6HKtMnsxSKEz5S",
+        "CeA3sPZfWWToFEBmw5n1Y93tnV66Vmp8LacLzsVprgxZ",
+        "AaG6of1gbj1pbDumvbSiTuJhRCRkkUNaWVxijSbWvTJW",
+        "7oi1L8U9MRu5zDz5syFahsiLUric47LzvJBQX6r827ws",
+        "9kPrgLggBJ69tx1czYAbp7fezuUmL337BsqQTKETUEhP",
+        "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy",
+        "4FobGn5ZWYquoJkxMzh2VUAWvV36xMgxQ3M7uG1pGGhd",
+        "76sxKrPtgoJHDJvxwFHqb3cAXWfRHFLe3VpKcLCAHSEf",
+        "H2cDR3EkJjtTKDQKk8SJS48du9mhsdzQhy8xJx5UMqQK",
+        "8m5GkL7nVy95G4YVUbs79z873oVKqg2afgKRmqxsiiRm",
+        "4kuG6NsAFJNwqEkac8GFDMMheCGKUPEbaRVHHyFHSwWz",
+        "8vFGAKdwpn4hk7kc1cBgfWZzpyW3MEMDATDzVZhddeQb",
+        "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG",
+        "DZfEurFKFtSbdWZsKSDTqpqsQgvXxmESpvRtXkAdgLwM",
+        "5L2QKqDn5ukJSWGyqR4RPvFvwnBabKWqAqMzH4heaQNB",
+        "DYVeNgXGLAhZdeLMMYnCw1nPnMxkBN7fJnNpHmizTrrF",
+        "Hbj6XdxX6eV4nfbYTseysibp4zZJtVRRPn2J3BhGRuK9",
+        "846ah7iBSu9ApuCyEhA5xpnjHHX7d4QJKetWLbwzmJZ8",
+        "5BqYhuD4q1YD3DMAYkc1FeTu9vqQVYYdfBAmkZjamyZg",
         "BfFX9rUm8qTZiZjmeq9BktWVTNuG3YWMc5AvkrCKJike"
       ],
       "sources": [
         "https://github.com/DefiLlama/dimension-adapters/blob/master/fees/axiom.ts",
         "https://bitquery.io/investigations/solana-jito-tips-trading-app-fees (2026 wallet BfFX9...)"
-      ]
+      ],
+      "note": "Axiom sends most landing tips to eight accounts of its own, and only one is published, so its tip cost is mostly not counted."
     },
     "Photon": {
-      "fee_wallets": ["AVUCZyuT35YSuj4RH7fwiyPu82Djn2Hfg7y2ND2XcnZH"],
-      "sources": ["https://github.com/DefiLlama/dimension-adapters/blob/master/fees/photon.ts"]
+      "fee_wallets": [
+        "AVUCZyuT35YSuj4RH7fwiyPu82Djn2Hfg7y2ND2XcnZH"
+      ],
+      "sources": [
+        "https://github.com/DefiLlama/dimension-adapters/blob/master/fees/photon.ts"
+      ]
     },
     "BullX": {
-      "fee_wallets": ["9RYJ3qr5eU5xAooqVcbmdeusjcViL5Nkiq7Gske3tiKq"],
-      "sources": ["https://github.com/DefiLlama/dimension-adapters/blob/master/fees/bullx.ts"]
+      "fee_wallets": [
+        "9RYJ3qr5eU5xAooqVcbmdeusjcViL5Nkiq7Gske3tiKq"
+      ],
+      "sources": [
+        "https://github.com/DefiLlama/dimension-adapters/blob/master/fees/bullx.ts"
+      ]
     },
     "GMGN": {
       "fee_wallets": [
-        "BB5dnY55FXS1e1NXqZDwCzgdYJdMCj3B92PU6Q5Fb6DT", "7sHXjs1j7sDJGVSMSPjD1b4v3FD6uRSvRWfhRdfv5BiA",
-        "HeZVpHj9jLwTVtMMbzQRf6mLtFPkWNSg11o68qrbUBa3", "ByRRgnZenY6W2sddo1VJzX9o4sMU4gPDUkcmgrpGBxRy",
-        "DXfkEGoo6WFsdL7x6gLZ7r6Hw2S6HrtrAQVPWYx2A1s9", "3t9EKmRiAUcQUYzTZpNojzeGP1KBAVEEbDNmy6wECQpK",
-        "DymeoWc5WLNiQBaoLuxrxDnDRvLgGZ1QGsEoCAM7Jsrx", "dBhdrmwBkRa66XxBuAK4WZeZnsZ6bHeHCCLXa3a8bTJ",
+        "BB5dnY55FXS1e1NXqZDwCzgdYJdMCj3B92PU6Q5Fb6DT",
+        "7sHXjs1j7sDJGVSMSPjD1b4v3FD6uRSvRWfhRdfv5BiA",
+        "HeZVpHj9jLwTVtMMbzQRf6mLtFPkWNSg11o68qrbUBa3",
+        "ByRRgnZenY6W2sddo1VJzX9o4sMU4gPDUkcmgrpGBxRy",
+        "DXfkEGoo6WFsdL7x6gLZ7r6Hw2S6HrtrAQVPWYx2A1s9",
+        "3t9EKmRiAUcQUYzTZpNojzeGP1KBAVEEbDNmy6wECQpK",
+        "DymeoWc5WLNiQBaoLuxrxDnDRvLgGZ1QGsEoCAM7Jsrx",
+        "dBhdrmwBkRa66XxBuAK4WZeZnsZ6bHeHCCLXa3a8bTJ",
         "6TxjC5wJzuuZgTtnTMipwwULEbMPx5JPW3QwWkdTGnrn"
       ],
-      "sources": ["https://github.com/DefiLlama/dimension-adapters/blob/master/fees/gmgnai.ts"]
+      "sources": [
+        "https://github.com/DefiLlama/dimension-adapters/blob/master/fees/gmgnai.ts"
+      ]
     },
     "Trojan": {
-      "fee_wallets": ["BBYXdwhqbCxVRVtnuMTTxh8biNisz3ZxsnHfr44jXytR", "9yMwSPk9mrXSN7yDHUuZurAh1sjbJsfpUqjZ7SvVtdco"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/trojan_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "BBYXdwhqbCxVRVtnuMTTxh8biNisz3ZxsnHfr44jXytR",
+        "9yMwSPk9mrXSN7yDHUuZurAh1sjbJsfpUqjZ7SvVtdco"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/trojan_solana_bot_trades.sql"
+      ]
     },
     "BonkBot": {
-      "fee_wallets": ["ZG98FUCjb8mJ824Gbs6RsgVmr1FhXb2oNiJHa2dwmPd"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bonkbot/bonkbot_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "ZG98FUCjb8mJ824Gbs6RsgVmr1FhXb2oNiJHa2dwmPd"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bonkbot/bonkbot_solana_bot_trades.sql"
+      ]
     },
     "Maestro": {
-      "fee_wallets": ["FRMxAnZgkW58zbYcE7Bxqsg99VWpJh6sMP5xLzAWNabN", "MaestroUL88UBnZr3wfoN7hqmNWFi3ZYCGqZoJJHE36"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/maestro_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "FRMxAnZgkW58zbYcE7Bxqsg99VWpJh6sMP5xLzAWNabN",
+        "MaestroUL88UBnZr3wfoN7hqmNWFi3ZYCGqZoJJHE36"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/maestro_solana_bot_trades.sql"
+      ]
     },
     "Banana Gun": {
       "fee_wallets": [
-        "8r2hZoDfk5hDWJ1sDujAi2Qr45ZyZw5EQxAXiMZWLKh2", "Cj297UauzMX64FU9dKJZRUBWszJ7tEWpVheasq4CfATV",
-        "HKMh8nV3ysSofRi23LsfVGLGQKB415QAEfZT96kCcVj4", "7tQiiBdKoScWQkB1RmVuML7DBGnR31cuKPEtMM7Vy5SA",
-        "4BBNEVRgrxVKv9f7pMNE788XM1tt379X9vNjpDH2KCL7", "47hEzz83VFR23rLTEeVm9A7eFzjJwjvdupPPmX3cePqF",
-        "EMbqD9Y9jLXEa3RbCR8AsEW1kVa3EiJgDLVgvKh4qNFP", "Lk693UiTzQC4vobasRS1QGcYA9D6RGYLjHp1bWreQtM"
+        "8r2hZoDfk5hDWJ1sDujAi2Qr45ZyZw5EQxAXiMZWLKh2",
+        "Cj297UauzMX64FU9dKJZRUBWszJ7tEWpVheasq4CfATV",
+        "HKMh8nV3ysSofRi23LsfVGLGQKB415QAEfZT96kCcVj4",
+        "7tQiiBdKoScWQkB1RmVuML7DBGnR31cuKPEtMM7Vy5SA",
+        "4BBNEVRgrxVKv9f7pMNE788XM1tt379X9vNjpDH2KCL7",
+        "47hEzz83VFR23rLTEeVm9A7eFzjJwjvdupPPmX3cePqF",
+        "EMbqD9Y9jLXEa3RbCR8AsEW1kVa3EiJgDLVgvKh4qNFP",
+        "Lk693UiTzQC4vobasRS1QGcYA9D6RGYLjHp1bWreQtM"
       ],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/banana_gun_solana_bot_trades.sql"]
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/banana_gun_solana_bot_trades.sql"
+      ]
     },
     "Bloom": {
-      "fee_wallets": ["7HeD6sLLqAnKVRuSfc1Ko3BSPMNKWgGTiWLKXJF31vKM"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bloom_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "7HeD6sLLqAnKVRuSfc1Ko3BSPMNKWgGTiWLKXJF31vKM"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bloom_solana_bot_trades.sql"
+      ]
     },
     "Nova": {
-      "fee_wallets": ["noVaE91mUL5jTb8e9Vf6dqJdNPzJpEQ3uAdnQ8h4nVz"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/nova_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "noVaE91mUL5jTb8e9Vf6dqJdNPzJpEQ3uAdnQ8h4nVz"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/nova_solana_bot_trades.sql"
+      ]
     },
     "MevX": {
-      "fee_wallets": ["3kxSQybWEeQZsMuNWMRJH4TxrhwoDwfv41TNMLRzFP5A", "BS3CyJ9rRC4Tp8G7f86r6hGvuu3XdrVGNVpbNM9U5WRZ", "4Lpvp1q69SHentfYcMBUrkgvppeEx6ovHCSYjg4UYXiq"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/mev_x_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "3kxSQybWEeQZsMuNWMRJH4TxrhwoDwfv41TNMLRzFP5A",
+        "BS3CyJ9rRC4Tp8G7f86r6hGvuu3XdrVGNVpbNM9U5WRZ",
+        "4Lpvp1q69SHentfYcMBUrkgvppeEx6ovHCSYjg4UYXiq"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/mev_x_solana_bot_trades.sql"
+      ]
     },
     "TradeWiz": {
-      "fee_wallets": ["97VmzkjX9w8gMFS2RnHTSjtMEDbifGXBq9pgosFdFnM"],
-      "sources": ["https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/tradewiz_solana_bot_trades.sql"]
+      "fee_wallets": [
+        "97VmzkjX9w8gMFS2RnHTSjtMEDbifGXBq9pgosFdFnM"
+      ],
+      "sources": [
+        "https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/tradewiz_solana_bot_trades.sql"
+      ]
     }
   },
   "tip_accounts": {
     "Jito": {
       "accounts": [
-        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt", "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
-        "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe", "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-        "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-        "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh", "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"
+        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+        "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+        "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+        "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+        "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+        "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+        "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+        "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"
       ],
       "source": "Jito block engine getTipAccounts, https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts"
     },
     "Nozomi": {
       "accounts": [
-        "TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq", "noz3jAjPiHuBPqiSPkkugaJDkJscPuRhYnSpbi8UvC4",
-        "noz3str9KXfpKknefHji8L1mPgimezaiUyCHYMDv1GE", "noz6uoYCDijhu1V7cutCpwxNiSovEwLdRHPwmgCGDNo",
-        "noz9EPNcT7WH6Sou3sr3GGjHQYVkN3DNirpbvDkv9YJ", "nozFrhfnNGoyqwVuwPAW4aaGqempx4PU6g6D9CJMv7Z",
-        "nozNVWs5N8mgzuD3qigrCG2UoKxZttxzZ85pvAQVrbP", "nozUacTVWub3cL4mJmGCYjKZTnE9RbdY5AP46iQgbPJ",
-        "nozWCyTPppJjRuw2fpzDhhWbW355fzosWSzrrMYB1Qk", "nozWNju6dY353eMkMqURqwQEoM3SFgEKC6psLCSfUne",
-        "nozc5yT15LazbLTFVZzoNZCwjh3yUtW86LoUyqsBu4L", "nozievPk7HyK1Rqy1MPJwVQ7qQg2QoJGyP71oeDwbsu",
-        "noznbgwYnBLDHu8wcQVCEw6kDrXkPdKkydGJGNXGvL7", "nozpEGbwx4BcGp6pvEdAh1JoC2CQGZdU6HbNP1v2p6P",
-        "nozrhjhkCr3zXT3BiT4WCodYCUFeQvcdUkM7MqhKqge", "nozrwQtWhEdrA6W8dkbt9gnUaMs52PdAv5byipnadq3",
+        "TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq",
+        "noz3jAjPiHuBPqiSPkkugaJDkJscPuRhYnSpbi8UvC4",
+        "noz3str9KXfpKknefHji8L1mPgimezaiUyCHYMDv1GE",
+        "noz6uoYCDijhu1V7cutCpwxNiSovEwLdRHPwmgCGDNo",
+        "noz9EPNcT7WH6Sou3sr3GGjHQYVkN3DNirpbvDkv9YJ",
+        "nozFrhfnNGoyqwVuwPAW4aaGqempx4PU6g6D9CJMv7Z",
+        "nozNVWs5N8mgzuD3qigrCG2UoKxZttxzZ85pvAQVrbP",
+        "nozUacTVWub3cL4mJmGCYjKZTnE9RbdY5AP46iQgbPJ",
+        "nozWCyTPppJjRuw2fpzDhhWbW355fzosWSzrrMYB1Qk",
+        "nozWNju6dY353eMkMqURqwQEoM3SFgEKC6psLCSfUne",
+        "nozc5yT15LazbLTFVZzoNZCwjh3yUtW86LoUyqsBu4L",
+        "nozievPk7HyK1Rqy1MPJwVQ7qQg2QoJGyP71oeDwbsu",
+        "noznbgwYnBLDHu8wcQVCEw6kDrXkPdKkydGJGNXGvL7",
+        "nozpEGbwx4BcGp6pvEdAh1JoC2CQGZdU6HbNP1v2p6P",
+        "nozrhjhkCr3zXT3BiT4WCodYCUFeQvcdUkM7MqhKqge",
+        "nozrwQtWhEdrA6W8dkbt9gnUaMs52PdAv5byipnadq3",
         "nozxNBgWohjR75vdspfxR5H9ceC7XXH99xpxhVGt3Bb"
       ],
       "source": "https://use.temporal.xyz/nozomi/tipping-and-faq"
     },
     "Axiom tip account": {
-      "accounts": ["axm2JQY1FKEktAwgXWqjGYkkWsWPfwKzgbnGVt5kiP4"],
+      "accounts": [
+        "axm2JQY1FKEktAwgXWqjGYkkWsWPfwKzgbnGVt5kiP4"
+      ],
       "source": "https://bitquery.io/investigations/solana-jito-tips-trading-app-fees (one of eight axm... accounts; the other seven are not published)"
     }
   }

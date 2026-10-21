@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+<title>Solana Bot Cost Index</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Public+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single ledger column; each app is one line item whose bar is its real cost per 100 SOL. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #141821; --muted: #5b6475; --rule: #dde1e8;
+  --accent: #2346d6;
+  --c-app: #1f2a44; --c-net: #7d8aa6; --c-tip: #c98a12;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Public Sans", "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1218; --panel: #161b24; --fg: #e8ebf1; --muted: #9aa4b6; --rule: #2a3140;
+  --accent: #8ea3ff; --c-app: #c9d3ea; --c-net: #66728c; --c-tip: #e0a93a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f1218; --panel: #161b24; --fg: #e8ebf1; --muted: #9aa4b6; --rule: #2a3140;
+  --accent: #8ea3ff; --c-app: #c9d3ea; --c-net: #66728c; --c-tip: #e0a93a; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(30px, 5vw, 46px); font-weight: 800; line-height: 1.05; }
+h2 { font-size: 20px; font-weight: 700; }
+p { margin: 0; max-width: 66ch; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+header { display: grid; gap: 14px; }
+.lede { font-size: 17px; color: var(--muted); }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.meta b { color: var(--fg); font-weight: 500; }
+.ledger { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 700px; font-variant-numeric: tabular-nums; }
+th { font-family: var(--mono); font-size: 11.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); text-align: left; padding: 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 14px 12px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-family: var(--mono); font-size: 13.5px; white-space: nowrap; }
+.rank { font-family: var(--mono); color: var(--muted); width: 28px; }
+.app { font-family: var(--display); font-weight: 700; font-size: 16px; white-space: nowrap; }
+.total { font-family: var(--display); font-weight: 800; font-size: 19px; }
+.bar { display: flex; height: 12px; width: 100%; min-width: 120px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.bar span { display: block; height: 100%; }
+.s-app { background: var(--c-app); } .s-net { background: var(--c-net); } .s-tip { background: var(--c-tip); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 32px; }
+.split > div { display: grid; gap: 10px; align-content: start; min-width: 0; }
+ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.note { font-size: 13.5px; color: var(--muted); }
+.sources { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+footer { border-top: 1px solid var(--rule); padding-top: 18px; font-size: 13px; color: var(--muted); display: grid; gap: 6px; }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Independent · measured on-chain · free</div>
+  <h1>What Solana trading bots really cost you</h1>
+  <p class="lede">For every 100 SOL traded, how much each app's users actually paid: the app's fee, Solana's network fee, and tips paid to get trades landed. Read straight from the transactions, so anyone can check any number.</p>
+  <div class="meta"><span>Trades measured <b>646</b></span><span>Apps <b>8</b></span><span>Window <b>16 Oct 2026 10:41 UTC to 21 Oct 2026 04:29 UTC</b></span><span>Data <b>Solana's free public data server</b></span></div>
+</header>
+
+<section style="display:grid;gap:14px">
+  <div class="legend"><span><i class="s-app"></i>App fee</span><span><i class="s-net"></i>Network fee</span><span><i class="s-tip"></i>Landing tips</span></div>
+  <div class="ledger"><table>
+    <thead><tr><th></th><th>App</th><th class="num">SOL per 100 SOL</th><th>Where it goes</th><th class="num">Typical trade</th><th class="num">Median size</th><th class="num">Trades</th><th class="num">Check</th></tr></thead>
+    <tbody><tr>
+<td class="rank">1</td>
+<td class="app">Axiom<sup>*</sup></td>
+<td class="num total">0.91</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 0.90, network fee 0.01, tips 0.00 SOL per 100 SOL">
+<span class="s-app" style="width:47.53%"></span><span class="s-net" style="width:0.59%"></span><span class="s-tip" style="width:0.01%"></span></div></td>
+<td class="num">1.00%</td>
+<td class="num">0.239 SOL</td>
+<td class="num">118</td>
+<td class="num"><a href="https://solscan.io/tx/2j8DKEHQ75mCHxUC7uxMxS91aC5YS9if1BYyBNrqhBxdL8rfUCF8nQuvMMajoAsfBNxc2bMfRYiRVBwWAKT4vJXR" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">2</td>
+<td class="app">Maestro</td>
+<td class="num total">1.00</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 1.00, network fee 0.00, tips 0.00 SOL per 100 SOL">
+<span class="s-app" style="width:52.64%"></span><span class="s-net" style="width:0.03%"></span><span class="s-tip" style="width:0.00%"></span></div></td>
+<td class="num">1.00%</td>
+<td class="num">0.368 SOL</td>
+<td class="num">52</td>
+<td class="num"><a href="https://solscan.io/tx/66uZm7D2RQgisK6a1vJmZdoKbaXmtDNKojK3XbzoZGQWtyRQ7ak6X4t3Ex5MDLWkjQ3HHJ19zmGbMuDcVJynNWMJ" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">3</td>
+<td class="app">Photon</td>
+<td class="num total">1.07</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 0.96, network fee 0.11, tips 0.01 SOL per 100 SOL">
+<span class="s-app" style="width:50.44%"></span><span class="s-net" style="width:5.80%"></span><span class="s-tip" style="width:0.35%"></span></div></td>
+<td class="num">1.09%</td>
+<td class="num">0.283 SOL</td>
+<td class="num">107</td>
+<td class="num"><a href="https://solscan.io/tx/HFksd4i1ojuMX6MupCmXUMLEtCTFLiB7aGqgnbWTDube4QZ3uJYQVWebkc7RKiV8FfkBe3bEzwRFK1eEqomn4MF" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">4</td>
+<td class="app">GMGN</td>
+<td class="num total">1.13</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 1.01, network fee 0.12, tips 0.00 SOL per 100 SOL">
+<span class="s-app" style="width:53.03%"></span><span class="s-net" style="width:6.40%"></span><span class="s-tip" style="width:0.01%"></span></div></td>
+<td class="num">1.08%</td>
+<td class="num">0.188 SOL</td>
+<td class="num">111</td>
+<td class="num"><a href="https://solscan.io/tx/4mcKR4os7Pv5pDuwZ13zUsZohHy6B9Dc9kfSr4jirGyQHoZXq35YNMXuH4GCcaQBxATShqC3RnfVRJeS3EKYxgxF" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">5</td>
+<td class="app">Trojan</td>
+<td class="num total">1.22</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 1.00, network fee 0.22, tips 0.00 SOL per 100 SOL">
+<span class="s-app" style="width:52.75%"></span><span class="s-net" style="width:11.38%"></span><span class="s-tip" style="width:0.00%"></span></div></td>
+<td class="num">1.57%</td>
+<td class="num">0.103 SOL</td>
+<td class="num">61</td>
+<td class="num"><a href="https://solscan.io/tx/2fEXnxYtLXHtCTHG2fEuDDwvNw5PA7vzJNcDr9xfw64GqLU7wf1bgwo6vQZKau79qAJ82yEmYZfg8CMdUJqFZn1P" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">6</td>
+<td class="app">BonkBot</td>
+<td class="num total">1.33</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 1.01, network fee 0.32, tips 0.00 SOL per 100 SOL">
+<span class="s-app" style="width:53.13%"></span><span class="s-net" style="width:16.97%"></span><span class="s-tip" style="width:0.00%"></span></div></td>
+<td class="num">1.49%</td>
+<td class="num">0.495 SOL</td>
+<td class="num">80</td>
+<td class="num"><a href="https://solscan.io/tx/3aeRDLEh4mbed9ZuE2FzNPe6qzTPvRcDDkjFBZc3UQhTtxRYxm38CsGhqpEh2efTZwPQbAA8H9dbNq238mNwvazn" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">7</td>
+<td class="app">MevX</td>
+<td class="num total">1.40</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 0.90, network fee 0.44, tips 0.06 SOL per 100 SOL">
+<span class="s-app" style="width:47.53%"></span><span class="s-net" style="width:23.23%"></span><span class="s-tip" style="width:2.98%"></span></div></td>
+<td class="num">1.56%</td>
+<td class="num">0.143 SOL</td>
+<td class="num">57</td>
+<td class="num"><a href="https://solscan.io/tx/2ZNygWhmb9UHyEVTJozR5nqe33g5pdWKooDStcVe1CFcxU2JUZFLisJQGDYt7rbR1kELhVrG6TvQvfQ1JGFnfULq" target="_blank" rel="noopener">a trade</a></td>
+</tr><tr>
+<td class="rank">8</td>
+<td class="app">Bloom</td>
+<td class="num total">1.90</td>
+<td style="width:26%"><div class="bar" role="img" aria-label="app fee 1.00, network fee 0.78, tips 0.13 SOL per 100 SOL">
+<span class="s-app" style="width:52.51%"></span><span class="s-net" style="width:40.86%"></span><span class="s-tip" style="width:6.62%"></span></div></td>
+<td class="num">1.43%</td>
+<td class="num">0.211 SOL</td>
+<td class="num">60</td>
+<td class="num"><a href="https://solscan.io/tx/669aicGHcHHVdszte4YizM8L64XBpBQJTWXrpkZyG57HuyBSKAEqSiUkZeXn2A8BwWEvj9w5Zf8F8Lx5K3qRaJiq" target="_blank" rel="noopener">a trade</a></td>
+</tr></tbody>
+  </table></div>
+  <p class="note"><b>SOL per 100 SOL</b> is the total cost across every trade measured, divided by the total traded. <b>Typical trade</b> is the median single trade's cost as a share of its size. When it is much higher than the first column, the app's users mostly make small trades, where flat network fees and tips weigh heavily. No priceable trades were found for: Nova, TradeWiz.</p>
+  <p class="note"><sup>*</sup> Axiom: Axiom sends most landing tips to eight accounts of its own, and only one is published, so its tip cost is mostly not counted.</p>
+  <div style="display:grid;gap:8px"><h2>Not ranked yet</h2><ul class="note"><li><b>BullX</b>: 49% of its sampled trades paid its known fee wallets less than 0.05% of the trade, so its fees are probably collected somewhere not yet documented.</li><li><b>Banana Gun</b>: only 23 priceable trades in the 7 days before collection; at least 30 are needed to rank an app.</li></ul></div>
+</section>
+
+<section class="split">
+  <div>
+    <h2>Not counted yet</h2>
+    <p class="note">Every figure is a floor: users paid at least this much. These costs are real and not yet included:</p>
+    <ul class="note">
+      <li><b>Slippage and pool fees</b>: the price moving against a trade, and the trading pool's own fee.</li>
+      <li><b>Front-running</b>: losses to bots that trade just before and after a user.</li>
+      <li><b>Fees paid in tokens other than SOL</b>, and referral cuts paid out later.</li>
+      <li><b>Tips to landing services that don't publish their accounts</b>, including seven of Axiom's eight tip accounts.</li>
+    </ul>
+  </div>
+  <div>
+    <h2>How it works</h2>
+    <ul class="note">
+      <li>Each app collects its fee into public wallets. Every successful transaction that paid one of them is a trade on that app.</li>
+      <li>For each trade, the trader is the wallet that signed it and swapped a token. Its SOL change, minus refundable account deposits, gives the trade size.</li>
+      <li>Costs are the SOL that landed in the app's fee wallets, the network fee the trader paid, and SOL sent to published tip accounts.</li>
+      <li>This edition samples each app's most recent trades. The code is open and anyone can re-run it.</li>
+    </ul>
+  </div>
+</section>
+
+<section style="display:grid;gap:10px">
+  <h2>Where every address comes from</h2>
+  <p class="note">Apps are listed only when their fee wallets are documented in a public source. Nothing is guessed.</p>
+  <ul class="sources"><li><b>Axiom</b>: 21 fee wallet(s), from <a href="https://github.com/DefiLlama/dimension-adapters/blob/master/fees/axiom.ts" target="_blank" rel="noopener">github.com</a>, <a href="https://bitquery.io/investigations/solana-jito-tips-trading-app-fees" target="_blank" rel="noopener">bitquery.io</a></li><li><b>Maestro</b>: 2 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/maestro_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>Photon</b>: 1 fee wallet(s), from <a href="https://github.com/DefiLlama/dimension-adapters/blob/master/fees/photon.ts" target="_blank" rel="noopener">github.com</a></li><li><b>GMGN</b>: 9 fee wallet(s), from <a href="https://github.com/DefiLlama/dimension-adapters/blob/master/fees/gmgnai.ts" target="_blank" rel="noopener">github.com</a></li><li><b>Trojan</b>: 2 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/trojan_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>BonkBot</b>: 1 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bonkbot/bonkbot_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>MevX</b>: 3 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/mev_x_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>Bloom</b>: 1 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/bloom_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>BullX</b>: 1 fee wallet(s), from <a href="https://github.com/DefiLlama/dimension-adapters/blob/master/fees/bullx.ts" target="_blank" rel="noopener">github.com</a></li><li><b>Banana Gun</b>: 8 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/banana_gun_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>Nova</b>: 1 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/nova_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>TradeWiz</b>: 1 fee wallet(s), from <a href="https://github.com/duneanalytics/spellbook/blob/main/dbt_subprojects/solana/models/_sector/dex/bot_trades/solana/platforms/tradewiz_solana_bot_trades.sql" target="_blank" rel="noopener">github.com</a></li><li><b>Jito</b>: 8 account(s), Jito block engine getTipAccounts, https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts</li><li><b>Nozomi</b>: 17 account(s), https://use.temporal.xyz/nozomi/tipping-and-faq</li><li><b>Axiom tip account</b>: 1 account(s), https://bitquery.io/investigations/solana-jito-tips-trading-app-fees (one of eight axm... accounts; the other seven are not published)</li></ul>
+</section>
+
+<footer>
+  <span>Independent. No app pays to be listed or ranked, and there are no referral links on this page.</span>
+  <span>Generated 21 Oct 2026 04:32 UTC. Found an error? Every row links to a real transaction, so it can be checked.</span>
+</footer>
+</div>
+
+</body>
+</html>

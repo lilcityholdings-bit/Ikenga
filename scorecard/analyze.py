@@ -68,6 +68,16 @@ def analyze_tx(tx, fee_wallets, tip_accounts):
     if trader is None:
         return None, "no token swap by a signer"
 
+    # A trade is priced in SOL only when SOL is one side and exactly one other token moved. Token-to-
+    # token or token-to-USDC swaps can still pay a SOL fee, but their size can't be read in SOL.
+    mints = set()
+    for idx in set(tok_pre) | set(tok_post):
+        b = tok_post.get(idx) or tok_pre.get(idx)
+        if b["owner"] == trader and b["mint"] != WSOL and amt(tok_post.get(idx)) != amt(tok_pre.get(idx)):
+            mints.add(b["mint"])
+    if len(mints) != 1:
+        return None, "not priced in SOL (more than one token moved)"
+
     # The trader's SOL position: native lamports plus wrapped SOL held in token accounts.
     net = delta.get(trader, 0)
     rent_adj = 0
@@ -117,9 +127,30 @@ def analyze_tx(tx, fee_wallets, tip_accounts):
     }, None
 
 
+# An app is ranked only when its published fee wallets visibly catch its fees. If most sampled trades
+# paid them almost nothing, the app is very likely collecting fees in wallets nobody has documented,
+# and ranking it would make it look far cheaper than it is.
+# Only recent trades describe what an app costs today. Retired fee wallets still answer with their
+# last trades from years ago, which would otherwise mix old pricing into the score.
+MAX_AGE_DAYS = 7
+MIN_TRADES = 30
+LOW_FEE_PCT = 0.05      # below this share of trade size, a "fee" is not the app's real fee
+MAX_LOW_FEE_SHARE = 0.25
+
+
 def summarize(app, trades):
     if not trades:
         return {"app": app, "trades": 0}
+    if len(trades) < MIN_TRADES:
+        return {"app": app, "trades": len(trades), "unranked": True,
+                "reason": f"only {len(trades)} priceable trades in the {MAX_AGE_DAYS} days before "
+                          f"collection; at least {MIN_TRADES} are needed to rank an app"}
+    low = sum(1 for t in trades if 100 * t["app_fee_sol"] / t["trade_sol"] < LOW_FEE_PCT) / len(trades)
+    if low > MAX_LOW_FEE_SHARE:
+        return {"app": app, "trades": len(trades), "unranked": True,
+                "reason": f"{low:.0%} of its sampled trades paid its known fee wallets less than "
+                          f"{LOW_FEE_PCT}% of the trade, so its fees are probably collected somewhere "
+                          f"not yet documented"}
     vol = sum(t["trade_sol"] for t in trades)
     cost = lambda t: t["app_fee_sol"] + t["network_fee_sol"] + t["tips_sol"]
     pct = sorted(100 * cost(t) / t["trade_sol"] for t in trades)
@@ -164,6 +195,8 @@ def main():
                     continue
                 with open(path) as f:
                     rec, why = analyze_tx(json.load(f), wallets, tips)
+                if rec and (rec["time"] or 0) < index["collected_at"] - MAX_AGE_DAYS * 86400:
+                    rec, why = None, f"older than {MAX_AGE_DAYS} days (retired fee wallet)"
                 if rec:
                     rec["app"] = app
                     trades.append(rec)
@@ -175,8 +208,12 @@ def main():
             s["skipped"] = skipped.get(app, {})
             summary.append(s)
 
-    ranked = sorted((s for s in summary if s["trades"]), key=lambda s: s["cost_per_100"]["total"])
+    ranked = sorted((s for s in summary if s["trades"] and not s.get("unranked")),
+                    key=lambda s: s["cost_per_100"]["total"])
+    for s in ranked:
+        s["note"] = sources["apps"][s["app"]].get("note")
     result = {"collected_at": index["collected_at"], "rpc": index["rpc"], "apps": ranked,
+              "unranked": [{"app": s["app"], "reason": s["reason"]} for s in summary if s.get("unranked")],
               "not_enough_data": [s["app"] for s in summary if not s["trades"]]}
     with open(os.path.join(HERE, "data", "summary.json"), "w") as f:
         json.dump(result, f, indent=1)
@@ -186,6 +223,8 @@ def main():
         c = s["cost_per_100"]
         print(f"{s['app']:12s} {s['trades']:6d} {s['median_trade_sol']:10.3f} {c['total']:11.3f} "
               f"{s['typical_trade_cost_pct']:9.3f}  {c['app_fee']:.3f} / {c['network_fee']:.3f} / {c['tips']:.3f}")
+    for u in result["unranked"]:
+        print(f"{u['app']:12s} not ranked: {u['reason']}")
     for app in result["not_enough_data"]:
         print(f"{app:12s} no priceable trades ({skipped.get(app)})")
 
