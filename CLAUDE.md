@@ -10,6 +10,11 @@ work should keep each product easy to hand over to a buyer.
   work that isn't documented.
 - Suggest the organized option first, and keep advice practical and short.
 
+## Always end with the next step
+- End every reply with a short **Next step** section: the exact things the owner should do now, in order,
+  in plain words and phone-first (what to tap, where, what they should see). If nothing is needed from them,
+  say so and say what happens next. This applies to every chat and every product.
+
 ## Structure
 - One product per GitHub repo, owned by the company GitHub organization
   (`lilcityholdings-bit`). Don't put a new product inside another
